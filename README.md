@@ -1,103 +1,35 @@
-# Велотрекер в Telegram — прототип
+# Be. Ride!
 
-Бот записывает велопоездку через «Трансляцию геопозиции» Telegram, а Mini App
-показывает маршрут на карте, время, скорость и примерные калории.
+[![CI](https://github.com/qlarens/beride/actions/workflows/ci.yml/badge.svg)](https://github.com/qlarens/beride/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+![Python](https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white)
+![aiogram](https://img.shields.io/badge/aiogram-3.x-2CA5E0?logo=telegram&logoColor=white)
+![SQLite](https://img.shields.io/badge/SQLite-003B57?logo=sqlite&logoColor=white)
+![Telegram Mini App](https://img.shields.io/badge/Telegram-Mini%20App-26A5E4?logo=telegram&logoColor=white)
+![Status](https://img.shields.io/badge/status-prototype-orange)
 
-## Как это работает
-
-```
-Телефон ──(Live Location)──► Telegram ──► bot.py ──► rides.db (SQLite)
-                                                  ▲
-Mini App (webapp/index.html) ──── /api/... ───────┘
-```
-
-- Пока идёт трансляция, Telegram сам присылает боту новые координаты
-  (как редактирование одного сообщения), даже при заблокированном экране.
-- Поездка заканчивается, когда трансляцию останавливают, по команде `/stop`
-  или когда истекает выбранный срок трансляции.
-- Калории: по каждому отрезку `MET(скорость) × вес × часы`; остановки не считаются.
-
-## Файлы
-
-| Файл | Что делает |
-|---|---|
-| `bot.py` | бот (aiogram 3) + веб-сервер для Mini App и API |
-| `storage.py` | SQLite: пользователи, поездки, точки |
-| `ride_stats.py` | дистанция, время, скорость, калории |
-| `auth.py` | проверка подписи `initData` от Telegram |
-| `webapp/index.html` | сам Mini App: список поездок, карта, настройки |
-| `seed_demo.py` | тестовая поездка для проверки интерфейса |
+Велотрекер в Telegram: бот записывает поездку через «Трансляцию геопозиции», Mini App показывает маршрут, время, скорость и калории.
 
 ## Запуск
 
-1. **Создай бота** у [@BotFather](https://t.me/BotFather) (`/newbot`) и возьми токен.
+```bash
+pip install -r requirements.txt
+cloudflared tunnel --url http://localhost:8080   # Mini App нужен HTTPS
+export BOT_TOKEN="123456:ABC..."                 # от @BotFather
+export WEBAPP_URL="https://xxxx.trycloudflare.com"
+python bot.py
+```
 
-2. **Установи зависимости** (Python 3.10+):
-   ```bash
-   pip install -r requirements.txt
-   ```
+Дальше: `/start` в боте → «Открыть трекер». Тестовая поездка: `python seed_demo.py <user_id>`.
 
-3. **Дай серверу публичный HTTPS-адрес.** Telegram открывает Mini App только по HTTPS.
-   Для разработки проще всего туннель:
-   ```bash
-   cloudflared tunnel --url http://localhost:8080
-   # или: ngrok http 8080
-   ```
-   Скопируй выданный адрес вида `https://xxxx.trycloudflare.com`.
+Поездка: 📎 → «Геопозиция» → «Транслировать геопозицию». Конец — остановка трансляции или `/stop`.
 
-4. **Запусти бота:**
-   ```bash
-   export BOT_TOKEN="123456:ABC..."
-   export WEBAPP_URL="https://xxxx.trycloudflare.com"
-   python bot.py
-   ```
+## Файлы
 
-5. **Проверь:** напиши боту `/start`, нажми «Открыть трекер».
-   Чтобы сразу увидеть карту, добавь тестовую поездку:
-   `python seed_demo.py <твой_user_id>`.
+- `bot.py` — бот (aiogram 3) + веб-сервер и API для Mini App
+- `storage.py` — SQLite
+- `ride_stats.py` — дистанция, скорость, калории
+- `auth.py` — проверка `initData`
+- `webapp/index.html` — Mini App
 
-6. **Настоящая поездка:** в чате с ботом 📎 → «Геопозиция» →
-   «Транслировать геопозицию», выбери срок с запасом и поезжай.
-
-### Отладка в обычном браузере
-
-Вне Telegram у Mini App нет подписи пользователя, и API отвечает 401.
-Для локальной отладки можно задать `DEV_USER_ID=<user_id>` — тогда все запросы
-без подписи считаются запросами этого пользователя. **На публичном сервере не включать.**
-
-## Сервер (эта машина)
-
-Бот работает из `C:\srv\beride`, отдельно от `D:\projects`:
-
-| Путь | Что там | Доступ `beride-svc` |
-|---|---|---|
-| `app\` | копия кода (обновляет `deploy.ps1`) | чтение |
-| `python\`, `venv\` | свой Python 3.15 и зависимости (`requirements.lock`) | чтение |
-| `secrets\bot_token` | токен бота | чтение |
-| `data\` | `rides.db`, pid-файлы | запись |
-| `logs\` | `start.log` (адрес туннеля), `bot.log`, `cloudflared.log` | запись |
-
-- Задача Планировщика `beride` запускает `start.ps1` при загрузке от локального
-  пользователя `beride-svc` (не админ, вход интерактивно/RDP/по сети запрещён,
-  доступ к диску `D:` запрещён). `start.ps1` поднимает quick tunnel cloudflared,
-  берёт его адрес из лога и запускает бота; при падении перезапускает оба.
-- Обновить код: `powershell -File C:\srv\beride\deploy.ps1` (от администратора).
-- Остановить / запустить: `Stop-ScheduledTask beride` / `Start-ScheduledTask beride`.
-- Сменить токен: записать новый в `C:\srv\beride\secrets\bot_token` и перезапустить задачу.
-
-## Ограничения прототипа
-
-- Telegram присылает обновления трансляции не каждую секунду, а примерно
-  раз в несколько секунд или реже (зависит от движения и телефона), поэтому трек
-  менее подробный, чем в Strava, а на крутых поворотах дистанция немного занижается.
-- Калории — оценка. Пульсометр дал бы точнее.
-- Тайлы карты берутся с серверов OpenStreetMap: для личного проекта нормально,
-  для большой нагрузки нужен свой провайдер тайлов (MapTiler, Stadia и т.п.).
-- Статистика пересчитывается при каждом запросе — для пары человек этого хватит с запасом.
-
-## Идеи для следующего шага
-
-- Общая лента и сравнение с другом (рейтинг за неделю, общий километраж).
-- Групповая поездка: оба транслируют геопозицию, на карте два трека.
-- Экспорт в GPX для Strava / Komoot.
-- Деплой на VPS или Railway/Render вместо туннеля.
+> `DEV_USER_ID` отключает проверку подписи — только для локальной отладки, не на публичном сервере.
