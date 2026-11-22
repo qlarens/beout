@@ -5,6 +5,7 @@ Telegram присылает обновления, даже когда телеф
 запись не обрывается. Mini App (webapp/index.html) показывает карту и статистику.
 """
 import asyncio
+import json
 import logging
 import os
 import time
@@ -14,6 +15,10 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
+    BotCommand,
+    BufferedInputFile,
+    CallbackQuery,
+    ErrorEvent,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     MenuButtonWebApp,
@@ -24,7 +29,7 @@ from aiohttp import web
 
 from auth import validate_init_data
 from ride_stats import compute_stats
-from storage import Storage
+from storage import STAT_KEYS, Storage
 
 from settings import TOKEN, URL
 
@@ -34,14 +39,39 @@ WEBAPP_URL = URL.rstrip("/")  # публичный HTTPS-адрес этого �
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8080"))
 DB_PATH = os.environ.get("DB_PATH", "rides.db")
+BACKUP_DIR = os.environ.get("BACKUP_DIR") or str(Path(DB_PATH).resolve().parent / "backups")
+# Сюда бот пишет о запуске и ошибках. Свой user_id можно узнать у @userinfobot.
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 # Только для локальной отладки в обычном браузере, без Telegram. В проде не задавать!
 DEV_USER_ID = os.environ.get("DEV_USER_ID")
+# Поменял webapp/privacy.html — увеличь: бот попросит всех принять условия заново.
+POLICY_VERSION = 1
+PAGE_SIZE = 50
 
 WEBAPP_DIR = Path(__file__).parent / "webapp"
 
 logging.basicConfig(level=logging.INFO)
 db = Storage(DB_PATH)
 dp = Dispatcher()
+
+COMMANDS = [
+    BotCommand(command="start", description="Как начать поездку"),
+    BotCommand(command="stop", description="Завершить поездку"),
+    BotCommand(command="weight", description="Вес для калорий: /weight 72"),
+    BotCommand(command="privacy", description="Условия и конфиденциальность"),
+    BotCommand(command="export", description="Выгрузить мои данные"),
+    BotCommand(command="delete", description="Удалить все мои данные"),
+]
+
+CONSENT_TEXT = (
+    "Перед началом — коротко о данных.\n\n"
+    "Я сохраняю геопозицию во время трансляции (координаты, время, точность), "
+    "твой Telegram ID и вес, если укажешь. Это нужно только для маршрута и статистики. "
+    "Данные не продаются и не используются для рекламы.\n\n"
+    "Выгрузить свои данные: /export. Удалить всё: /delete.\n\n"
+    "Нажимая «Принимаю», ты соглашаешься с условиями использования "
+    "и политикой конфиденциальности."
+)
 
 
 # ---------- вспомогательное ----------
@@ -60,6 +90,17 @@ def fmt_duration(seconds):
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
+def has_consent(user_id):
+    return db.consent_version(user_id) >= POLICY_VERSION
+
+
+def stats_of(ride):
+    """Статистика закрытой поездки хранится в базе, идущей — считается на лету."""
+    if ride["ended_at"] is not None:
+        return {k: ride[k] for k in STAT_KEYS}
+    return compute_stats(db.get_points(ride["id"]), db.get_weight(ride["user_id"]))
+
+
 def open_app_keyboard(ride_id=None, text="🗺 Открыть трекер"):
     url = f"{WEBAPP_URL}/?ride={ride_id}" if ride_id else f"{WEBAPP_URL}/"
     return InlineKeyboardMarkup(
@@ -67,8 +108,30 @@ def open_app_keyboard(ride_id=None, text="🗺 Открыть трекер"):
     )
 
 
+def policy_keyboard(*extra_rows):
+    button = InlineKeyboardButton(text="📄 Условия и конфиденциальность", url=f"{WEBAPP_URL}/privacy")
+    return InlineKeyboardMarkup(inline_keyboard=[[button], *extra_rows])
+
+
+def consent_keyboard():
+    return policy_keyboard([InlineKeyboardButton(text="✅ Принимаю", callback_data="consent")])
+
+
+def welcome_text(user_id):
+    return (
+        "Привет! Я записываю велопоездки 🚴\n\n"
+        "<b>Как начать поездку:</b>\n"
+        "1. Нажми 📎 → «Геопозиция» → «Транслировать геопозицию» "
+        "и выбери срок с запасом.\n"
+        "2. Катайся — телефон можно убрать в карман. Следи за дорогой, а не за экраном.\n"
+        "3. В конце останови трансляцию (или отправь /stop).\n\n"
+        f"Вес для расчёта калорий: <b>{db.get_weight(user_id):g} кг</b>. Изменить: /weight 72\n"
+        "Мои данные: /export, удалить всё: /delete."
+    )
+
+
 def ride_summary(ride):
-    stats = compute_stats(db.get_points(ride["id"]), db.get_weight(ride["user_id"]))
+    stats = stats_of(ride)
     return (
         "🏁 <b>Поездка завершена</b>\n\n"
         f"📏 Дистанция: <b>{stats['distance_km']} км</b>\n"
@@ -79,10 +142,12 @@ def ride_summary(ride):
     )
 
 
-async def finish_and_report(message: Message, ride):
-    db.finish_ride(ride["id"])
-    ride = db.get_ride(ride["id"])
-    await message.bot.send_message(
+async def finish_and_report(bot, ride_id, ts=None):
+    """Закрывает поездку и присылает итог — только если её не закрыли раньше."""
+    if not db.finish_ride(ride_id, ts):
+        return
+    ride = db.get_ride(ride_id)
+    await bot.send_message(
         ride["chat_id"],
         ride_summary(ride),
         parse_mode="HTML",
@@ -90,26 +155,106 @@ async def finish_and_report(message: Message, ride):
     )
 
 
-# ---------- команды ----------
+_last_alert = 0.0
+
+
+async def notify_admin(bot, text):
+    """Сообщение администратору; не чаще раза в 5 минут, чтобы не завалить чат."""
+    global _last_alert
+    if not ADMIN_CHAT_ID or time.time() - _last_alert < 300:
+        return
+    _last_alert = time.time()
+    try:
+        await bot.send_message(int(ADMIN_CHAT_ID), text[:3500])
+    except Exception:
+        logging.exception("Не удалось написать администратору")
+
+
+async def reply_in_place(callback: CallbackQuery, text, reply_markup=None):
+    """Заменяет сообщение с кнопками на text (слишком старые Telegram менять не даёт)."""
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=reply_markup)
+    else:
+        await callback.bot.send_message(
+            callback.from_user.id, text, parse_mode="HTML", reply_markup=reply_markup
+        )
+    await callback.answer()
+
+
+# ---------- согласие, данные пользователя ----------
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    weight = db.get_weight(message.from_user.id)
+    if not has_consent(message.from_user.id):
+        await message.answer(CONSENT_TEXT, reply_markup=consent_keyboard())
+        return
     await message.answer(
-        "Привет! Я записываю велопоездки 🚴\n\n"
-        "<b>Как начать поездку:</b>\n"
-        "1. Нажми 📎 → «Геопозиция» → «Транслировать геопозицию» "
-        "и выбери срок с запасом.\n"
-        "2. Катайся — телефон можно убрать в карман.\n"
-        "3. В конце останови трансляцию (или отправь /stop).\n\n"
-        f"Вес для расчёта калорий: <b>{weight:g} кг</b>. Изменить: /weight 72",
-        parse_mode="HTML",
-        reply_markup=open_app_keyboard(),
+        welcome_text(message.from_user.id), parse_mode="HTML", reply_markup=open_app_keyboard()
     )
 
 
+@dp.callback_query(F.data == "consent")
+async def on_consent(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    db.set_consent(user_id, POLICY_VERSION)
+    await reply_in_place(callback, CONSENT_TEXT + "\n\n✅ <b>Принято</b>", policy_keyboard())
+    await callback.bot.send_message(
+        user_id, welcome_text(user_id), parse_mode="HTML", reply_markup=open_app_keyboard()
+    )
+
+
+@dp.message(Command("privacy"))
+async def cmd_privacy(message: Message):
+    await message.answer(
+        "Условия использования и политика конфиденциальности — по кнопке ниже.\n"
+        "Выгрузить свои данные: /export. Удалить всё: /delete.",
+        reply_markup=policy_keyboard(),
+    )
+
+
+@dp.message(Command("export"))
+async def cmd_export(message: Message):
+    data = json.dumps(db.export_user(message.from_user.id), ensure_ascii=False, indent=1)
+    await message.answer_document(
+        BufferedInputFile(data.encode(), filename="beride-export.json"),
+        caption="Все данные о тебе, которые хранит бот (время — unix timestamp).",
+    )
+
+
+@dp.message(Command("delete"))
+async def cmd_delete(message: Message):
+    await message.answer(
+        "Удалить все твои данные: поездки, маршруты, вес и согласие с условиями? "
+        "Отменить это нельзя. Если нужна копия — сначала /export.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🗑 Да, удалить всё", callback_data="delete:yes")],
+            [InlineKeyboardButton(text="Отмена", callback_data="delete:no")],
+        ]),
+    )
+
+
+@dp.callback_query(F.data.in_({"delete:yes", "delete:no"}))
+async def on_delete(callback: CallbackQuery):
+    if callback.data == "delete:no":
+        await reply_in_place(callback, "Отменено, данные на месте.")
+        return
+    db.delete_user(callback.from_user.id)
+    await reply_in_place(
+        callback,
+        "🗑 Все твои данные удалены. Из резервных копий они исчезнут в течение 7 дней.\n"
+        "Если трансляция геопозиции ещё идёт — останови её в Telegram. "
+        "Сообщения в этом чате удаляются средствами Telegram.\n"
+        "Чтобы снова пользоваться ботом — /start.",
+    )
+
+
+# ---------- команды ----------
+
 @dp.message(Command("weight"))
 async def cmd_weight(message: Message, command: CommandObject):
+    if not has_consent(message.from_user.id):
+        await message.answer(CONSENT_TEXT, reply_markup=consent_keyboard())
+        return
     try:
         weight = float((command.args or "").replace(",", "."))
         if not 30 <= weight <= 250:
@@ -127,7 +272,7 @@ async def cmd_stop(message: Message):
     if not ride:
         await message.answer("Сейчас нет активной поездки.")
         return
-    await finish_and_report(message, ride)
+    await finish_and_report(message.bot, ride["id"])
 
 
 # ---------- геопозиция ----------
@@ -139,6 +284,13 @@ async def on_location(message: Message):
         await message.answer(
             "Это обычная геопозиция, по ней маршрут не построить. "
             "Нужна именно «Трансляция геопозиции» 📡"
+        )
+        return
+    if not has_consent(message.from_user.id):
+        await message.answer(
+            CONSENT_TEXT + "\n\nПока условия не приняты, я ничего не записываю. "
+            "После этого начни трансляцию заново.",
+            reply_markup=consent_keyboard(),
         )
         return
 
@@ -172,7 +324,13 @@ async def on_location_update(message: Message):
     )
     # Когда трансляцию останавливают, приходит последнее обновление без live_period.
     if not loc.live_period:
-        await finish_and_report(message, ride)
+        await finish_and_report(message.bot, ride["id"])
+
+
+@dp.errors()
+async def on_error(event: ErrorEvent, bot: Bot):
+    logging.error("Ошибка при обработке update", exc_info=event.exception)
+    await notify_admin(bot, f"⚠️ Ошибка в боте: {event.exception!r}")
 
 
 # ---------- API для Mini App ----------
@@ -180,58 +338,60 @@ async def on_location_update(message: Message):
 def current_user_id(request):
     user = validate_init_data(request.headers.get("X-Init-Data", ""), BOT_TOKEN)
     if user:
-        return int(user["id"])
-    if DEV_USER_ID:
-        return int(DEV_USER_ID)
-    raise web.HTTPUnauthorized(text="Откройте приложение из Telegram")
+        user_id = int(user["id"])
+    elif DEV_USER_ID:
+        user_id = int(DEV_USER_ID)
+    else:
+        raise web.HTTPUnauthorized(text="Откройте приложение из Telegram")
+    if not has_consent(user_id):
+        raise web.HTTPForbidden(text="Сначала прими условия в чате с ботом: /start")
+    return user_id
 
 
-def ride_to_json(ride, weight):
-    stats = compute_stats(db.get_points(ride["id"]), weight)
+def ride_to_json(ride):
     return {
         "id": ride["id"],
         "started_at": ride["started_at"],
         "ended_at": ride["ended_at"],
         "active": ride["ended_at"] is None,
-        **stats,
+        **stats_of(ride),
     }
 
 
 async def api_rides(request):
     user_id = current_user_id(request)
-    db.close_expired(user_id)
-    weight = db.get_weight(user_id)
-    rides = [ride_to_json(r, weight) for r in db.list_rides(user_id)]
-    totals = {
-        "count": len(rides),
-        "distance_km": round(sum(r["distance_km"] for r in rides), 1),
-        "moving_s": sum(r["moving_s"] for r in rides),
-        "kcal": sum(r["kcal"] for r in rides),
-    }
-    return web.json_response({"weight": weight, "rides": rides, "totals": totals})
+    try:
+        before = float(request.query["before"]) if "before" in request.query else None
+    except ValueError:
+        raise web.HTTPBadRequest(text="before должен быть числом")
+    rides = [ride_to_json(r) for r in db.list_rides(user_id, PAGE_SIZE, before)]
+    return web.json_response({
+        "weight": db.get_weight(user_id),
+        "rides": rides,
+        "has_more": len(rides) == PAGE_SIZE,
+        "totals": db.totals(user_id),
+    })
 
 
 async def api_ride(request):
     user_id = current_user_id(request)
-    db.close_expired(user_id)
     ride = db.get_ride(int(request.match_info["ride_id"]))
     if not ride or ride["user_id"] != user_id:
         raise web.HTTPNotFound(text="Поездка не найдена")
     points = db.get_points(ride["id"])
     return web.json_response({
-        "ride": ride_to_json(ride, db.get_weight(user_id)),
+        "ride": ride_to_json(ride),
         "points": [[lat, lon, ts] for ts, lat, lon in points],
     })
 
 
 async def api_set_weight(request):
     user_id = current_user_id(request)
-    data = await request.json()
     try:
-        weight = float(data["weight"])
+        weight = float((await request.json())["weight"])
         if not 30 <= weight <= 250:
             raise ValueError
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError):  # битый JSON — тоже ValueError
         raise web.HTTPBadRequest(text="Вес должен быть от 30 до 250 кг")
     db.set_weight(user_id, weight)
     return web.json_response({"weight": weight})
@@ -241,13 +401,35 @@ async def index(_request):
     return web.FileResponse(WEBAPP_DIR / "index.html")
 
 
+async def privacy(_request):
+    return web.FileResponse(WEBAPP_DIR / "privacy.html")
+
+
 def make_web_app():
     app = web.Application()
     app.router.add_get("/", index)
+    app.router.add_get("/privacy", privacy)
     app.router.add_get("/api/rides", api_rides)
     app.router.add_get("/api/rides/{ride_id:\\d+}", api_ride)
     app.router.add_post("/api/weight", api_set_weight)
     return app
+
+
+# ---------- фон: брошенные поездки и резервные копии ----------
+
+async def housekeeping(bot):
+    while True:
+        try:
+            for ride_id, last_ts in db.stale_rides():
+                try:
+                    await finish_and_report(bot, ride_id, last_ts)
+                except Exception:  # пользователь заблокировал бота и т.п. — поездка всё равно закрыта
+                    logging.exception("Не удалось отправить итог поездки %s", ride_id)
+            db.backup(BACKUP_DIR)
+        except Exception as e:
+            logging.exception("Фоновая задача упала")
+            await notify_admin(bot, f"⚠️ Фоновая задача: {e!r}")
+        await asyncio.sleep(60)
 
 
 async def main():
@@ -256,15 +438,20 @@ async def main():
     await bot.set_chat_menu_button(
         menu_button=MenuButtonWebApp(text="Мои поездки", web_app=WebAppInfo(url=f"{WEBAPP_URL}/"))
     )
+    await bot.set_my_commands(COMMANDS)
 
     runner = web.AppRunner(make_web_app())
     await runner.setup()
     await web.TCPSite(runner, HOST, PORT).start()
     logging.info("Mini App: http://%s:%s (публично: %s)", HOST, PORT, WEBAPP_URL)
 
+    # Частые сообщения о запуске — признак того, что бот падает и перезапускается.
+    await notify_admin(bot, f"✅ Be. Ride! запущен: {WEBAPP_URL}")
+    background = asyncio.create_task(housekeeping(bot))
     try:
-        await dp.start_polling(bot, allowed_updates=["message", "edited_message"])
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        background.cancel()
         await runner.cleanup()
 
 

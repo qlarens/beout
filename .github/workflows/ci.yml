@@ -22,6 +22,5 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Compile
         run: python -m compileall -q .
-      # bot.py/settings.py need BOT_TOKEN at import, so only env-free modules are imported
-      - name: Import modules
-        run: python -c "import auth, ride_stats, storage"
+      - name: Tests
+        run: python -m unittest -v

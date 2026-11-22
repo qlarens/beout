@@ -64,6 +64,8 @@
     border: 0; border-radius: 10px; padding: 9px 14px; font-size: 15px;
     background: var(--accent); color: var(--accent-text); cursor: pointer;
   }
+  #more { width: 100%; }
+  a { color: var(--accent); }
   .error { color: #e53935; margin: 12px 0; }
 </style>
 </head>
@@ -75,6 +77,7 @@
   <div class="totals" id="totals"></div>
   <h2>История</h2>
   <div id="rides"></div>
+  <button id="more" class="hidden">Показать ещё</button>
 
   <h2>Настройки</h2>
   <div class="weight-row">
@@ -83,6 +86,10 @@
     <button id="save-weight">Сохранить</button>
   </div>
   <p class="hint">Вес нужен для расчёта калорий. Это примерная оценка по скорости (метод MET).</p>
+
+  <h2>Мои данные</h2>
+  <p class="hint">Выгрузить все данные — /export, удалить всё — /delete в чате с ботом.<br>
+    <a href="/privacy" id="privacy-link">Условия и политика конфиденциальности</a></p>
 </section>
 
 <!-- Одна поездка -->
@@ -152,22 +159,49 @@ async function showList() {
     tile(fmtDuration(t.moving_s), "в движении") +
     tile(t.kcal, "ккал");
 
-  if (!data.rides.length) {
-    $("rides").innerHTML = `<div class="empty">Пока нет поездок.<br>
+  $("rides").innerHTML = data.rides.length ? data.rides.map(rideHtml).join("") :
+    `<div class="empty">Пока нет поездок.<br>
       Начни трансляцию геопозиции в чате с ботом — и поездка появится здесь.</div>`;
-    return;
-  }
-  $("rides").innerHTML = data.rides.map((r) => `
+  setMore(data);
+}
+
+function rideHtml(r) {
+  return `
     <div class="ride" data-id="${r.id}">
       <div>
         <div class="date">${fmtDate(r.started_at)}${r.active ? '<span class="live">LIVE</span>' : ""}</div>
         <div class="meta">${fmtDuration(r.moving_s)} · ${r.avg_speed_kmh} км/ч · ${r.kcal} ккал</div>
       </div>
       <div class="km">${r.distance_km} км</div>
-    </div>`).join("");
-  document.querySelectorAll(".ride").forEach((el) =>
-    el.addEventListener("click", () => showRide(el.dataset.id).catch(showError)));
+    </div>`;
 }
+
+// Следующая страница — поездки старше последней показанной.
+let lastStartedAt = null;
+function setMore(data) {
+  if (data.rides.length) lastStartedAt = data.rides[data.rides.length - 1].started_at;
+  $("more").classList.toggle("hidden", !data.has_more);
+}
+
+$("more").addEventListener("click", async () => {
+  try {
+    const data = await api(`/api/rides?before=${lastStartedAt}`);
+    $("rides").insertAdjacentHTML("beforeend", data.rides.map(rideHtml).join(""));
+    setMore(data);
+  } catch (e) { showError(e); }
+});
+
+$("rides").addEventListener("click", (e) => {
+  const el = e.target.closest(".ride");
+  if (el) showRide(el.dataset.id).catch(showError);
+});
+
+// Внутри Telegram открываем во встроенном браузере, чтобы не уходить из Mini App.
+$("privacy-link").addEventListener("click", (e) => {
+  if (!tg) return;
+  e.preventDefault();
+  tg.openLink(new URL("/privacy", location.href).href);
+});
 
 // ---------- поездка ----------
 async function showRide(id) {
