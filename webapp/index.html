@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Велотрекер</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --text: var(--tg-theme-text-color, #111111);
+    --hint: var(--tg-theme-hint-color, #8a8a8e);
+    --card: var(--tg-theme-secondary-bg-color, #f1f1f4);
+    --accent: var(--tg-theme-button-color, #2ea6ff);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px;
+    background: var(--bg); color: var(--text);
+    font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  h1 { font-size: 22px; margin: 0 0 12px; }
+  h2 { font-size: 17px; margin: 20px 0 8px; }
+  .hint { color: var(--hint); font-size: 13px; }
+  .hidden { display: none !important; }
+
+  .totals, .stats {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+  }
+  .tile { background: var(--card); border-radius: 12px; padding: 10px; }
+  .tile b { display: block; font-size: 18px; }
+  .tile span { color: var(--hint); font-size: 12px; }
+
+  .ride {
+    background: var(--card); border-radius: 12px; padding: 12px;
+    margin-bottom: 8px; cursor: pointer;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .ride .date { font-weight: 600; }
+  .ride .meta { color: var(--hint); font-size: 13px; }
+  .ride .km { font-size: 18px; font-weight: 700; white-space: nowrap; }
+  .live {
+    display: inline-block; background: #e53935; color: #fff;
+    border-radius: 6px; padding: 1px 6px; font-size: 11px; margin-left: 6px;
+    animation: pulse 1.5s infinite;
+  }
+  @keyframes pulse { 50% { opacity: .5; } }
+
+  #map { height: 52vh; border-radius: 12px; margin-bottom: 12px; }
+  .empty { text-align: center; padding: 32px 8px; color: var(--hint); }
+
+  .weight-row { display: flex; gap: 8px; align-items: center; }
+  .weight-row input {
+    width: 90px; padding: 8px 10px; font-size: 15px;
+    border: 1px solid var(--hint); border-radius: 10px;
+    background: var(--bg); color: var(--text);
+  }
+  button {
+    border: 0; border-radius: 10px; padding: 9px 14px; font-size: 15px;
+    background: var(--accent); color: var(--accent-text); cursor: pointer;
+  }
+  .error { color: #e53935; margin: 12px 0; }
+</style>
+</head>
+<body>
+
+<!-- Список поездок -->
+<section id="list-view">
+  <h1>🚴 Мои поездки</h1>
+  <div class="totals" id="totals"></div>
+  <h2>История</h2>
+  <div id="rides"></div>
+
+  <h2>Настройки</h2>
+  <div class="weight-row">
+    <label for="weight">Вес, кг</label>
+    <input id="weight" type="number" inputmode="decimal" min="30" max="250" step="0.5">
+    <button id="save-weight">Сохранить</button>
+  </div>
+  <p class="hint">Вес нужен для расчёта калорий. Это примерная оценка по скорости (метод MET).</p>
+</section>
+
+<!-- Одна поездка -->
+<section id="ride-view" class="hidden">
+  <h1 id="ride-title">Поездка</h1>
+  <div id="map"></div>
+  <div class="stats" id="ride-stats"></div>
+  <p class="hint" id="ride-hint"></p>
+</section>
+
+<div class="error hidden" id="error"></div>
+
+<script>
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+
+const $ = (id) => document.getElementById(id);
+let map = null, routeLayer = null, refreshTimer = null;
+
+// ---------- API ----------
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Init-Data": (tg && tg.initData) || "",
+      ...(options.headers || {}),
+    },
+  });
+  if (!res.ok) throw new Error((await res.text()) || `Ошибка ${res.status}`);
+  return res.json();
+}
+
+function showError(err) {
+  $("error").textContent = err.message || String(err);
+  $("error").classList.remove("hidden");
+}
+
+// ---------- форматирование ----------
+function fmtDuration(s) {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return h ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
+}
+function fmtDate(ts) {
+  return new Date(ts * 1000).toLocaleString("ru-RU", {
+    day: "numeric", month: "long", hour: "2-digit", minute: "2-digit",
+  });
+}
+function tile(value, label) {
+  return `<div class="tile"><b>${value}</b><span>${label}</span></div>`;
+}
+
+// ---------- список ----------
+async function showList() {
+  stopRefresh();
+  if (tg) tg.BackButton.hide();
+  $("ride-view").classList.add("hidden");
+  $("list-view").classList.remove("hidden");
+
+  const data = await api("/api/rides");
+  $("weight").value = data.weight;
+
+  const t = data.totals;
+  $("totals").innerHTML =
+    tile(t.distance_km, "км всего") +
+    tile(fmtDuration(t.moving_s), "в движении") +
+    tile(t.kcal, "ккал");
+
+  if (!data.rides.length) {
+    $("rides").innerHTML = `<div class="empty">Пока нет поездок.<br>
+      Начни трансляцию геопозиции в чате с ботом — и поездка появится здесь.</div>`;
+    return;
+  }
+  $("rides").innerHTML = data.rides.map((r) => `
+    <div class="ride" data-id="${r.id}">
+      <div>
+        <div class="date">${fmtDate(r.started_at)}${r.active ? '<span class="live">LIVE</span>' : ""}</div>
+        <div class="meta">${fmtDuration(r.moving_s)} · ${r.avg_speed_kmh} км/ч · ${r.kcal} ккал</div>
+      </div>
+      <div class="km">${r.distance_km} км</div>
+    </div>`).join("");
+  document.querySelectorAll(".ride").forEach((el) =>
+    el.addEventListener("click", () => showRide(el.dataset.id).catch(showError)));
+}
+
+// ---------- поездка ----------
+async function showRide(id) {
+  $("list-view").classList.add("hidden");
+  $("ride-view").classList.remove("hidden");
+  if (tg) tg.BackButton.show();
+
+  if (!map) {
+    map = L.map("map", { zoomControl: false });
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19, attribution: "© OpenStreetMap",
+    }).addTo(map);
+    routeLayer = L.layerGroup().addTo(map);
+  }
+  map.invalidateSize(); // карта была в скрытом блоке
+
+  await renderRide(id, true);
+  stopRefresh();
+  refreshTimer = setInterval(() => renderRide(id, false).catch(showError), 15000);
+}
+
+async function renderRide(id, fitView) {
+  const { ride, points } = await api(`/api/rides/${id}`);
+
+  $("ride-title").innerHTML = fmtDate(ride.started_at) +
+    (ride.active ? '<span class="live">LIVE</span>' : "");
+  $("ride-stats").innerHTML =
+    tile(ride.distance_km, "км") +
+    tile(fmtDuration(ride.duration_s), "всего") +
+    tile(fmtDuration(ride.moving_s), "в движении") +
+    tile(ride.avg_speed_kmh, "ср. км/ч") +
+    tile(ride.max_speed_kmh, "макс. км/ч") +
+    tile(ride.kcal, "ккал");
+  $("ride-hint").textContent = ride.active
+    ? "Поездка идёт — данные обновляются каждые 15 секунд."
+    : `Точек маршрута: ${points.length}`;
+
+  routeLayer.clearLayers();
+  if (!points.length) { map.setView([52.23, 21.01], 12); return; }
+
+  const latlngs = points.map((p) => [p[0], p[1]]);
+  const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#2ea6ff";
+  L.polyline(latlngs, { color: accent, weight: 5 }).addTo(routeLayer);
+  L.circleMarker(latlngs[0], { radius: 7, color: "#fff", fillColor: "#43a047", fillOpacity: 1, weight: 2 })
+    .bindTooltip("Старт").addTo(routeLayer);
+  L.circleMarker(latlngs[latlngs.length - 1], { radius: 7, color: "#fff", fillColor: ride.active ? "#e53935" : "#222", fillOpacity: 1, weight: 2 })
+    .bindTooltip(ride.active ? "Сейчас" : "Финиш").addTo(routeLayer);
+
+  if (fitView) {
+    if (latlngs.length > 1) map.fitBounds(latlngs, { padding: [24, 24] });
+    else map.setView(latlngs[0], 15);
+  }
+}
+
+function stopRefresh() {
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+}
+
+// ---------- настройки ----------
+$("save-weight").addEventListener("click", async () => {
+  try {
+    await api("/api/weight", { method: "POST", body: JSON.stringify({ weight: Number($("weight").value) }) });
+    if (tg) tg.HapticFeedback.notificationOccurred("success");
+    await showList();
+  } catch (e) { showError(e); }
+});
+
+if (tg) tg.BackButton.onClick(() => showList().catch(showError));
+
+// ---------- старт: ?ride=ID открывает сразу нужную поездку ----------
+const rideParam = new URLSearchParams(location.search).get("ride");
+(rideParam ? showRide(rideParam) : showList()).catch(showError);
+</script>
+</body>
+</html>
