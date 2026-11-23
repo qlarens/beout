@@ -29,12 +29,12 @@ from aiohttp import web
 
 from auth import validate_init_data
 from stats import compute_stats
+from settings import APP_NAME
 from storage import STAT_KEYS, Storage
 
-from settings import APP_NAME, TOKEN, URL
-
-BOT_TOKEN = TOKEN
-WEBAPP_URL = URL.rstrip("/")  # публичный HTTPS-адрес этого сервера
+# Секреты — только из окружения, чтобы токен не лежал в коде.
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+WEBAPP_URL = os.environ["WEBAPP_URL"].rstrip("/")  # публичный HTTPS-адрес этого сервера
 # cloudflared ходит на localhost; 0.0.0.0 открыл бы API всей локальной сети.
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8080"))
@@ -101,10 +101,10 @@ def stats_of(ride):
     return compute_stats(db.get_points(ride["id"]), db.get_weight(ride["user_id"]))
 
 
-def open_app_keyboard(ride_id=None, text="🗺 Открыть трекер"):
+def open_app_keyboard(ride_id=None, text="🗺 Открыть трекер", *extra_rows):
     url = f"{WEBAPP_URL}/?ride={ride_id}" if ride_id else f"{WEBAPP_URL}/"
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=text, web_app=WebAppInfo(url=url))]]
+        inline_keyboard=[[InlineKeyboardButton(text=text, web_app=WebAppInfo(url=url))], *extra_rows]
     )
 
 
@@ -124,7 +124,7 @@ def welcome_text(user_id):
         "1. Нажми 📎 → «Геопозиция» → «Транслировать геопозицию» "
         "и выбери срок с запасом.\n"
         "2. Катайся — телефон можно убрать в карман. Следи за дорогой, а не за экраном.\n"
-        "3. В конце останови трансляцию (или отправь /stop).\n\n"
+        "3. В конце нажми «Финиш» (или останови трансляцию, или отправь /stop).\n\n"
         f"Вес для расчёта калорий: <b>{db.get_weight(user_id):g} кг</b>. Изменить: /weight 72\n"
         "Мои данные: /export, удалить всё: /delete."
     )
@@ -275,6 +275,17 @@ async def cmd_stop(message: Message):
     await finish_and_report(message.bot, ride["id"])
 
 
+@dp.callback_query(F.data.regexp(r"^finish:\d+$"))
+async def on_finish(callback: CallbackQuery):
+    ride = db.get_ride(int(callback.data.split(":")[1]))
+    if not ride or ride["user_id"] != callback.from_user.id:
+        await callback.answer("Поездка не найдена")
+        return
+    await finish_and_report(callback.bot, ride["id"])
+    # Финиш не останавливает трансляцию в Telegram — новые точки просто не записываются.
+    await callback.answer("Готово. Трансляцию геопозиции можно остановить.")
+
+
 # ---------- геопозиция ----------
 
 @dp.message(F.location)
@@ -305,8 +316,11 @@ async def on_location(message: Message):
     db.add_point(ride_id, ts, loc.latitude, loc.longitude, loc.horizontal_accuracy)
     await message.answer(
         "🚴 Поездка началась, записываю маршрут!\n"
-        "Чтобы закончить, останови трансляцию или отправь /stop.",
-        reply_markup=open_app_keyboard(ride_id, "📍 Смотреть в реальном времени"),
+        "Чтобы закончить, нажми «Финиш», останови трансляцию или отправь /stop.",
+        reply_markup=open_app_keyboard(
+            ride_id, "📍 Смотреть в реальном времени",
+            [InlineKeyboardButton(text="🏁 Финиш", callback_data=f"finish:{ride_id}")],
+        ),
     )
 
 
@@ -373,16 +387,28 @@ async def api_rides(request):
     })
 
 
-async def api_ride(request):
+def own_ride(request):
+    """Поездка из URL; чужая — как несуществующая, чтобы не выдавать чужие id."""
     user_id = current_user_id(request)
     ride = db.get_ride(int(request.match_info["ride_id"]))
     if not ride or ride["user_id"] != user_id:
         raise web.HTTPNotFound(text="Поездка не найдена")
+    return ride
+
+
+async def api_ride(request):
+    ride = own_ride(request)
     points = db.get_points(ride["id"])
     return web.json_response({
         "ride": ride_to_json(ride),
         "points": [[lat, lon, ts] for ts, lat, lon in points],
     })
+
+
+async def api_finish(request):
+    ride = own_ride(request)
+    await finish_and_report(request.app[BOT_KEY], ride["id"])
+    return web.json_response({"ride": ride_to_json(db.get_ride(ride["id"]))})
 
 
 async def api_set_weight(request):
@@ -405,12 +431,17 @@ async def privacy(_request):
     return web.FileResponse(WEBAPP_DIR / "privacy.html")
 
 
-def make_web_app():
+BOT_KEY = web.AppKey("bot", Bot)
+
+
+def make_web_app(bot):
     app = web.Application()
+    app[BOT_KEY] = bot  # итог по кнопке «Финиш» из Mini App уходит в чат
     app.router.add_get("/", index)
     app.router.add_get("/privacy", privacy)
     app.router.add_get("/api/rides", api_rides)
     app.router.add_get("/api/rides/{ride_id:\\d+}", api_ride)
+    app.router.add_post("/api/rides/{ride_id:\\d+}/finish", api_finish)
     app.router.add_post("/api/weight", api_set_weight)
     return app
 
@@ -440,7 +471,7 @@ async def main():
     )
     await bot.set_my_commands(COMMANDS)
 
-    runner = web.AppRunner(make_web_app())
+    runner = web.AppRunner(make_web_app(bot))
     await runner.setup()
     await web.TCPSite(runner, HOST, PORT).start()
     logging.info("Mini App: http://%s:%s (публично: %s)", HOST, PORT, WEBAPP_URL)

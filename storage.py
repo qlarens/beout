@@ -3,6 +3,7 @@ import sqlite3
 import time
 from pathlib import Path
 
+from settings import DEFAULT_WEIGHT, MAX_ACCURACY_M, STALE_AFTER_S
 from stats import compute_stats
 
 SCHEMA = """
@@ -37,12 +38,6 @@ NEW_COLUMNS = {
     "users": ("consent_at REAL", "consent_version INTEGER NOT NULL DEFAULT 0"),
     "rides": tuple(f"{k} NUMERIC" for k in STAT_KEYS),  # заполняются при завершении поездки
 }
-
-DEFAULT_WEIGHT = 75.0
-MAX_ACCURACY_M = 50  # точки с погрешностью больше — шум GPS (здания, тоннели)
-# Нет новых точек столько времени — поездку закрываем (сел телефон, пропала сеть).
-# Меньше не ставить: на долгой остановке Telegram может молчать, и конец поездки потеряется.
-STALE_AFTER_S = 2 * 3600
 
 
 class Storage:

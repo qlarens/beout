@@ -62,6 +62,41 @@ class StatsTest(unittest.TestCase):
         self.assertEqual(compute_stats(jumpy, 75), compute_stats(base, 75))
         self.assertAlmostEqual(compute_stats(base, 75)["distance_km"], 0.5, places=1)
 
+    def test_noisy_track(self):
+        """Едем 300 с, стоим 300 с с дрожанием ±2 м и скачком GPS, едем ещё 300 с."""
+        go1 = line(31)
+        t0, lat0 = go1[-1][0], go1[-1][1]
+        stop = [(t0 + i * 5, lat0 + (-1) ** i * 0.00002, 21.0) for i in range(1, 60)]
+        stop[30] = (stop[30][0], 52.3, 21.0)  # скачок на ~30 км
+        go2 = [(t0 + 300 + ts, lat0 + lat - 52.0, lon) for ts, lat, lon in line(31)]
+        stats = compute_stats(go1 + stop + go2, 75)
+        self.assertAlmostEqual(stats["distance_km"], 60 * 0.0556, delta=0.01)  # только езда
+        self.assertEqual(stats["moving_s"], 600)
+        self.assertEqual(stats["duration_s"], 900)
+
+    def test_jitter_does_not_add_distance(self):
+        still = [(i * 5, 52.0 + (-1) ** i * 0.00001, 21.0) for i in range(120)]  # 10 мин, ±1 м
+        stats = compute_stats(still, 75, "walk")
+        self.assertEqual((stats["distance_km"], stats["moving_s"]), (0, 0))
+
+    def test_autopause(self):
+        def track(crawl_s):  # 100 с едем, crawl_s ползём 2 км/ч, 100 с едем
+            go = line(11)
+            t0, lat0 = go[-1][0], go[-1][1]
+            crawl = [(t0 + i * 10, lat0 + i * 0.00005, 21.0) for i in range(1, crawl_s // 10 + 1)]
+            t1, lat1 = crawl[-1][0], crawl[-1][1]
+            return go + crawl + [(t1 + ts, lat1 + lat - 52.0, lon) for ts, lat, lon in line(11)[1:]]
+
+        self.assertEqual(compute_stats(track(10), 75)["moving_s"], 210)  # короткое замедление — в движении
+        long_crawl = compute_stats(track(60), 75)
+        self.assertEqual(long_crawl["duration_s"], 260)
+        self.assertEqual(long_crawl["moving_s"], 210)  # после 12 с медленной езды — пауза
+
+    def test_speed_limit_depends_on_activity(self):
+        fast = [(i * 10, 52.0 + i * 0.001, 21.0) for i in range(10)]  # ~40 км/ч
+        self.assertAlmostEqual(compute_stats(fast, 75, "ride")["distance_km"], 1.0, places=1)
+        self.assertEqual(compute_stats(fast, 75, "run")["distance_km"], 0)  # для бега это скачки GPS
+
 
 class StorageTest(unittest.TestCase):
     def setUp(self):
@@ -151,7 +186,8 @@ class StorageTest(unittest.TestCase):
 class ApiTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         bot.db = Storage(":memory:")
-        self.client = TestClient(TestServer(bot.make_web_app()))
+        self.tg = SimpleNamespace(send_message=AsyncMock())
+        self.client = TestClient(TestServer(bot.make_web_app(self.tg)))
         await self.client.start_server()
 
     async def asyncTearDown(self):
@@ -180,6 +216,15 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call("GET", f"/api/rides/{ride_id}", 1)).status, 404)
         self.assertEqual((await self.call("GET", f"/api/rides/{ride_id}", 2)).status, 200)
         self.assertEqual((await (await self.call("GET", "/api/rides", 1)).json())["rides"], [])
+
+    async def test_finish_from_mini_app(self):
+        self.consent(1, 2)
+        ride_id = bot.db.start_ride(1, 1, 1, time.time())
+        self.assertEqual((await self.call("POST", f"/api/rides/{ride_id}/finish", 2)).status, 404)
+        response = await self.call("POST", f"/api/rides/{ride_id}/finish", 1)
+        self.assertEqual(response.status, 200)
+        self.assertFalse((await response.json())["ride"]["active"])
+        self.tg.send_message.assert_awaited_once()  # итог пришёл в чат
 
     async def test_weight_validation(self):
         self.consent(1)
@@ -248,6 +293,25 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         await bot.on_delete(self.callback("delete:yes"))
         self.assertIsNone(bot.db.get_ride(ride["id"]))
         self.assertFalse(bot.has_consent(1))
+
+    async def test_finish_button(self):
+        await bot.on_consent(self.callback("consent"))
+        msg = self.location()
+        await bot.on_location(msg)
+        ride = bot.db.active_ride(1)
+        markup = msg.answer.call_args.kwargs["reply_markup"]
+        self.assertIn(f"finish:{ride['id']}", [b.callback_data for row in markup.inline_keyboard for b in row])
+
+        self.tg.send_message.reset_mock()
+        stranger = self.callback(f"finish:{ride['id']}")
+        stranger.from_user = SimpleNamespace(id=2)
+        await bot.on_finish(stranger)
+        self.assertIsNone(bot.db.get_ride(ride["id"])["ended_at"])  # чужую не завершить
+
+        await bot.on_finish(self.callback(f"finish:{ride['id']}"))
+        await bot.on_finish(self.callback(f"finish:{ride['id']}"))
+        self.assertIsNotNone(bot.db.get_ride(ride["id"])["ended_at"])
+        self.assertEqual(self.tg.send_message.await_count, 1)  # итог — ровно один раз
 
 
 if __name__ == "__main__":

@@ -53,6 +53,8 @@
 
   #map { height: 52vh; border-radius: 12px; margin-bottom: 12px; }
   .empty { text-align: center; padding: 32px 8px; color: var(--hint); }
+  .steps { text-align: left; color: var(--text); margin: 12px auto 0; max-width: 320px; }
+  .steps li { margin-bottom: 6px; }
 
   .weight-row { display: flex; gap: 8px; align-items: center; }
   .weight-row input {
@@ -146,6 +148,7 @@ function tile(value, label) {
 // ---------- список ----------
 async function showList() {
   stopRefresh();
+  setFinish(null);
   if (tg) tg.BackButton.hide();
   $("ride-view").classList.add("hidden");
   $("list-view").classList.remove("hidden");
@@ -160,8 +163,13 @@ async function showList() {
     tile(t.kcal, "ккал");
 
   $("rides").innerHTML = data.rides.length ? data.rides.map(rideHtml).join("") :
-    `<div class="empty">Пока нет поездок.<br>
-      Начни трансляцию геопозиции в чате с ботом — и поездка появится здесь.</div>`;
+    `<div class="empty"><b>Как начать</b>
+      <ol class="steps">
+        <li>В чате с ботом нажми скрепку → «Геопозиция».</li>
+        <li>Выбери «Транслировать геопозицию» и срок с запасом.</li>
+        <li>Двигайся — телефон можно убрать в карман.</li>
+        <li>В конце нажми «Финиш» здесь или в чате.</li>
+      </ol></div>`;
   setMore(data);
 }
 
@@ -225,6 +233,8 @@ async function showRide(id) {
 
 async function renderRide(id, fitView) {
   const { ride, points } = await api(`/api/rides/${id}`);
+  if ($("ride-view").classList.contains("hidden")) return; // пока ждали ответ, ушли к списку
+  setFinish(ride);
 
   $("ride-title").innerHTML = fmtDate(ride.started_at) +
     (ride.active ? '<span class="live">LIVE</span>' : "");
@@ -259,6 +269,26 @@ async function renderRide(id, fitView) {
 function stopRefresh() {
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
 }
+
+// Кнопка «Финиш» внизу экрана Telegram — только у идущей поездки, открытой сейчас.
+let finishRideId = null;
+function setFinish(ride) {
+  finishRideId = ride && ride.active ? ride.id : null;
+  if (!tg) return;
+  if (finishRideId) tg.MainButton.setText("Финиш").show(); else tg.MainButton.hide();
+}
+
+if (tg) tg.MainButton.onClick(() => {
+  const id = finishRideId;
+  tg.showConfirm("Завершить поездку?", async (ok) => {
+    if (!ok || !id) return;
+    try {
+      await api(`/api/rides/${id}/finish`, { method: "POST" });
+      tg.HapticFeedback.notificationOccurred("success");
+      await renderRide(id, false);
+    } catch (e) { showError(e); }
+  });
+});
 
 // ---------- настройки ----------
 $("save-weight").addEventListener("click", async () => {
