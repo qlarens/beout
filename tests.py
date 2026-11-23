@@ -294,6 +294,12 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(bot.db.get_ride(ride["id"]))
         self.assertFalse(bot.has_consent(1))
 
+    async def test_waits_out_flood_control(self):
+        flood = bot.TelegramRetryAfter(method=None, message="Too Many Requests", retry_after=0)
+        tg = SimpleNamespace(me=AsyncMock(side_effect=[flood, flood, "me"]))
+        self.assertEqual(await bot.wait_out_flood(tg), "me")
+        self.assertEqual(tg.me.await_count, 3)
+
     async def test_finish_button(self):
         await bot.on_consent(self.callback("consent"))
         msg = self.location()

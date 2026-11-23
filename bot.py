@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     BotCommand,
@@ -463,13 +464,29 @@ async def housekeeping(bot):
         await asyncio.sleep(60)
 
 
+async def wait_out_flood(bot):
+    """Ждёт, пока Telegram снимет лимит запросов. Падать нельзя: перезапуск продлил бы лимит."""
+    while True:
+        try:
+            return await bot.me()  # результат кэшируется, start_polling его переиспользует
+        except TelegramRetryAfter as e:
+            logging.warning("Telegram просит подождать %s с (Flood control)", e.retry_after)
+            await asyncio.sleep(e.retry_after)
+
+
 async def main():
     bot = Bot(BOT_TOKEN)
-    # Кнопка «Мои поездки» слева от поля ввода в чате с ботом.
-    await bot.set_chat_menu_button(
-        menu_button=MenuButtonWebApp(text="Мои поездки", web_app=WebAppInfo(url=f"{WEBAPP_URL}/"))
-    )
-    await bot.set_my_commands(COMMANDS)
+    await wait_out_flood(bot)
+    try:
+        # Кнопка «Мои поездки» слева от поля ввода в чате с ботом.
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(text="Мои поездки", web_app=WebAppInfo(url=f"{WEBAPP_URL}/"))
+        )
+        await bot.set_my_commands(COMMANDS)
+    except TelegramAPIError as e:
+        # Меню хранится в Telegram с прошлого запуска. Падать тут нельзя: перезапуск снова
+        # упрётся в лимит запросов (Flood control), и бот не поднимется вовсе.
+        logging.warning("Меню бота не обновлено: %r", e)
 
     runner = web.AppRunner(make_web_app(bot))
     await runner.setup()
