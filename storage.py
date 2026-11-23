@@ -3,7 +3,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from ride_stats import compute_stats
+from stats import compute_stats
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -46,7 +46,7 @@ STALE_AFTER_S = 2 * 3600
 
 
 class Storage:
-    def __init__(self, path="rides.db"):
+    def __init__(self, path="beout.db"):
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         # Удалённые по /delete данные затираются в файле, а не остаются в свободных страницах.
@@ -230,7 +230,7 @@ class Storage:
         """Одна копия в день; старше keep дней удаляются (вместе с данными удалённых пользователей)."""
         backup_dir = Path(backup_dir)
         backup_dir.mkdir(parents=True, exist_ok=True)
-        target = backup_dir / f"rides-{time.strftime('%Y-%m-%d')}.db"
+        target = backup_dir / f"beout-{time.strftime('%Y-%m-%d')}.db"
         if not target.exists():
             tmp = target.with_suffix(".tmp")
             dst = sqlite3.connect(tmp)
@@ -239,5 +239,5 @@ class Storage:
             finally:
                 dst.close()
             tmp.replace(target)
-        for old in sorted(backup_dir.glob("rides-*.db"))[:-keep]:
+        for old in sorted(backup_dir.glob("beout-*.db"))[:-keep]:
             old.unlink()

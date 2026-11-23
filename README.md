@@ -1,6 +1,6 @@
-# Be. Ride!
+# Be. Out!
 
-[![CI](https://github.com/qlarens/beride/actions/workflows/ci.yml/badge.svg)](https://github.com/qlarens/beride/actions/workflows/ci.yml)
+[![CI](https://github.com/qlarens/beout/actions/workflows/ci.yml/badge.svg)](https://github.com/qlarens/beout/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white)
 ![aiogram](https://img.shields.io/badge/aiogram-3.x-2CA5E0?logo=telegram&logoColor=white)
@@ -31,7 +31,7 @@ python bot.py
 | Переменная | Зачем |
 |---|---|
 | `BOT_TOKEN`, `WEBAPP_URL` | обязательные |
-| `DB_PATH` | база, по умолчанию `rides.db` |
+| `DB_PATH` | база, по умолчанию `beout.db` |
 | `BACKUP_DIR` | ежедневные копии базы (хранятся 7 дней), по умолчанию `backups/` рядом с базой |
 | `ADMIN_CHAT_ID` | твой Telegram ID: сюда бот пишет о запуске и ошибках |
 | `DEV_USER_ID` | отключает проверку подписи — только для локальной отладки, не на публичном сервере |
@@ -45,7 +45,7 @@ python bot.py
 
 - `bot.py` — бот (aiogram 3) + веб-сервер и API для Mini App
 - `storage.py` — SQLite, миграции, бэкапы
-- `ride_stats.py` — дистанция, скорость, калории
+- `stats.py` — дистанция, скорость, калории
 - `auth.py` — проверка `initData`
 - `webapp/` — Mini App и страница условий
 - `tests.py` — тесты: `python -m unittest`

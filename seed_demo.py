@@ -14,7 +14,7 @@ def main():
     if len(sys.argv) != 2:
         sys.exit("Использование: python seed_demo.py <telegram_user_id>")
     user_id = int(sys.argv[1])
-    db = Storage("rides.db")
+    db = Storage("beout.db")
 
     # Круг ~10 км вокруг центра Варшавы, ~22 км/ч, точка каждые 20 секунд.
     center_lat, center_lon, radius_m = 52.2297, 21.0122, 1600

@@ -20,7 +20,7 @@ from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 
 import bot  # noqa: E402
 from auth import validate_init_data  # noqa: E402
-from ride_stats import compute_stats  # noqa: E402
+from stats import compute_stats  # noqa: E402
 from storage import SCHEMA, STALE_AFTER_S, Storage  # noqa: E402
 
 
@@ -138,10 +138,10 @@ class StorageTest(unittest.TestCase):
     def test_backup_keeps_last_7(self):
         with tempfile.TemporaryDirectory() as tmp:
             for day in range(1, 10):
-                Path(tmp, f"rides-2000-01-0{day}.db").touch()
+                Path(tmp, f"beout-2000-01-0{day}.db").touch()
             self.ride()
             self.db.backup(tmp)
-            files = sorted(Path(tmp).glob("rides-*.db"))
+            files = sorted(Path(tmp).glob("beout-*.db"))
             self.assertEqual(len(files), 7)
             copy = sqlite3.connect(files[-1])  # сегодняшняя — самая новая
             self.assertEqual(copy.execute("SELECT COUNT(*) FROM points").fetchone()[0], 10)

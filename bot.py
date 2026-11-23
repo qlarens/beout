@@ -28,17 +28,17 @@ from aiogram.types import (
 from aiohttp import web
 
 from auth import validate_init_data
-from ride_stats import compute_stats
+from stats import compute_stats
 from storage import STAT_KEYS, Storage
 
-from settings import TOKEN, URL
+from settings import APP_NAME, TOKEN, URL
 
 BOT_TOKEN = TOKEN
 WEBAPP_URL = URL.rstrip("/")  # публичный HTTPS-адрес этого сервера
 # cloudflared ходит на localhost; 0.0.0.0 открыл бы API всей локальной сети.
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8080"))
-DB_PATH = os.environ.get("DB_PATH", "rides.db")
+DB_PATH = os.environ.get("DB_PATH", "beout.db")
 BACKUP_DIR = os.environ.get("BACKUP_DIR") or str(Path(DB_PATH).resolve().parent / "backups")
 # Сюда бот пишет о запуске и ошибках. Свой user_id можно узнать у @userinfobot.
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
@@ -216,7 +216,7 @@ async def cmd_privacy(message: Message):
 async def cmd_export(message: Message):
     data = json.dumps(db.export_user(message.from_user.id), ensure_ascii=False, indent=1)
     await message.answer_document(
-        BufferedInputFile(data.encode(), filename="beride-export.json"),
+        BufferedInputFile(data.encode(), filename="beout-export.json"),
         caption="Все данные о тебе, которые хранит бот (время — unix timestamp).",
     )
 
@@ -446,7 +446,7 @@ async def main():
     logging.info("Mini App: http://%s:%s (публично: %s)", HOST, PORT, WEBAPP_URL)
 
     # Частые сообщения о запуске — признак того, что бот падает и перезапускается.
-    await notify_admin(bot, f"✅ Be. Ride! запущен: {WEBAPP_URL}")
+    await notify_admin(bot, f"✅ {APP_NAME} запущен: {WEBAPP_URL}")
     background = asyncio.create_task(housekeeping(bot))
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
