@@ -164,15 +164,17 @@ def render_story(kind, stats, records=(), tiles=None, elevation_m=None, date="")
     d.text((PAD * S + d.textlength(value, font=big) + 24 * S, 1190 * S), "км",
            font=font("InterDisplay-Bold.ttf", 72), fill=LIME, anchor="ls")
 
-    best = (fmt_duration(stats["best_1k_s"]), "лучший 1 км") if kind == "run" and stats["best_1k_s"] else None
     cells = [
         (fmt_duration(stats["moving_s"]), "в движении"),
         (f"{stats['avg_speed_kmh']}", "км/ч средняя"),
         (f"{stats['max_speed_kmh']}", "км/ч макс."),
         (f"{stats['kcal']}", "ккал"),
-        (f"{elevation_m} м" if elevation_m is not None else "–", "набор высоты"),
-        best or (fmt_duration(stats["duration_s"]), "всего"),
     ]
+    if elevation_m:  # не узнали или по ровному — не показываем
+        cells.append((f"{elevation_m} м", "набор высоты"))
+    if kind == "run" and stats["best_1k_s"]:
+        cells.append((fmt_duration(stats["best_1k_s"]), "лучший 1 км"))
+    cells = (cells + [(fmt_duration(stats["duration_s"]), "всего")])[:6]  # сетка 3×2
     col_w = (W - 2 * PAD) / 3
     for i, (value, label) in enumerate(cells):
         x, y = PAD + i % 3 * col_w, 1320 + i // 3 * 170

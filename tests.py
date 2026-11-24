@@ -19,7 +19,7 @@ os.environ.update(BOT_TOKEN=TOKEN, WEBAPP_URL="https://example.test", DB_PATH=":
 os.environ.pop("DEV_USER_ID", None)
 
 from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
-from PIL import Image  # noqa: E402
+from PIL import Image, ImageDraw  # noqa: E402
 
 import bot  # noqa: E402
 
@@ -431,6 +431,16 @@ class CardTest(unittest.TestCase):
                 self.assertEqual(Image.open(io.BytesIO(png)).size, (1080, 1350))
                 png = render_story("run", stats, ["Новый рекорд: самая длинная"], tiles, 12, "24.11.2026")
                 self.assertEqual(Image.open(io.BytesIO(png)).size, (1080, 1920))
+
+    def test_story_hides_missing_elevation(self):
+        stats = compute_stats(track((1.2, 10)), 70, "run")
+        for elevation, shown in ((None, False), (0, False), (35, True)):
+            with patch.object(ImageDraw.ImageDraw, "text", autospec=True) as text:
+                render_story("run", stats, [], None, elevation, "")
+            labels = [c.args[2] for c in text.call_args_list]
+            self.assertEqual("набор высоты" in labels, shown)
+            self.assertIn("лучший 1 км", labels)
+            self.assertEqual(len(labels), 2 + 2 + 6 * 2)  # шапка, дистанция с «км», полная сетка 3×2
 
     def test_map_view(self):
         def on_card(route):
