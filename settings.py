@@ -6,6 +6,7 @@
 import math
 
 APP_NAME = "Be. Out!"
+CARD_WATERMARK = "@beoutbot от lilaxy.com"  # под названием на карточках: откуда бот
 
 # --- точки GPS ---
 MAX_ACCURACY_M = 30  # точки с погрешностью больше — шум GPS (здания, тоннели), не сохраняем

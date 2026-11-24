@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-from settings import ACTIVITIES, APP_NAME, MAP_MAX_ZOOM
+from settings import ACTIVITIES, APP_NAME, CARD_WATERMARK, MAP_MAX_ZOOM
 from stats import fmt_duration
 
 ASSETS = Path(__file__).parent / "assets"
@@ -96,7 +96,8 @@ def header(img, top, right_text):
     d = ImageDraw.Draw(img)
     logo = Image.open(ASSETS / "brand" / "duet-512.png").resize((96 * S, 96 * S), Image.LANCZOS)
     img.paste(logo, ((PAD - 12) * S, (top - 12) * S), rounded(logo.size, 24))  # у логотипа свой тёмный фон
-    d.text(((PAD + 96) * S, (top + 36) * S), APP_NAME, font=font("InterDisplay-Bold.ttf", 44), fill=WHITE, anchor="lm")
+    d.text(((PAD + 96) * S, (top + 40) * S), APP_NAME, font=font("InterDisplay-Bold.ttf", 44), fill=WHITE, anchor="ls")
+    d.text(((PAD + 96) * S, (top + 76) * S), CARD_WATERMARK, font=font("Inter-Regular.ttf", 26), fill=MUTED, anchor="ls")
     d.text(((W - PAD) * S, (top + 36) * S), right_text, font=font("Inter-Regular.ttf", 36), fill=MUTED, anchor="rm")
 
 

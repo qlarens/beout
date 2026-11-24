@@ -32,7 +32,7 @@ from auth import validate_init_data  # noqa: E402
 from cards import MAP_H, MAP_MARGIN, MAP_W, TILE, map_view, project, render_card, render_story  # noqa: E402
 from aiohttp import web  # noqa: E402
 from stats import compute_stats, elevation_gain, streaks  # noqa: E402
-from settings import MAP_MAX_ZOOM, SESSION_TTL_S  # noqa: E402
+from settings import CARD_WATERMARK, MAP_MAX_ZOOM, SESSION_TTL_S  # noqa: E402
 from storage import SCHEMA, STALE_AFTER_S, Storage  # noqa: E402
 
 
@@ -440,7 +440,8 @@ class CardTest(unittest.TestCase):
             labels = [c.args[2] for c in text.call_args_list]
             self.assertEqual("набор высоты" in labels, shown)
             self.assertIn("лучший 1 км", labels)
-            self.assertEqual(len(labels), 2 + 2 + 6 * 2)  # шапка, дистанция с «км», полная сетка 3×2
+            self.assertEqual(len(labels), 3 + 2 + 6 * 2)  # шапка, дистанция с «км», полная сетка 3×2
+            self.assertIn(CARD_WATERMARK, labels)
 
     def test_map_view(self):
         def on_card(route):
