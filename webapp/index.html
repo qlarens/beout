@@ -10,300 +10,626 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
   integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <style>
+  @font-face { font-family: "Inter"; font-display: swap;
+    src: url("/assets/fonts/Inter-Regular.woff2") format("woff2"); }
+  @font-face { font-family: "Inter Display"; font-weight: 700; font-display: swap;
+    src: url("/assets/fonts/InterDisplay-Bold.woff2") format("woff2"); }
+
+  /* Светлая тема Telegram + фирменный акцент; в тёмной — фирменный фон. */
   :root {
     --bg: var(--tg-theme-bg-color, #ffffff);
-    --text: var(--tg-theme-text-color, #111111);
-    --hint: var(--tg-theme-hint-color, #8a8a8e);
-    --card: var(--tg-theme-secondary-bg-color, #f1f1f4);
-    --accent: var(--tg-theme-button-color, #2ea6ff);
-    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+    --text: var(--tg-theme-text-color, #0E1116);
+    --hint: var(--tg-theme-hint-color, #6B7280);
+    --card: var(--tg-theme-secondary-bg-color, #F1F2F4);
+    --accent: #C6F432;
+    --on-accent: #0E1116;
+    --ink: #4D6B00; /* акцентный текст: салатовый на белом не читается */
+    --danger: #E5484D;
+  }
+  [data-theme="dark"] {
+    --bg: #0E1116; --text: #FFFFFF; --hint: #B7BDC7; --card: #1A1F27; --ink: #C6F432;
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; padding: 16px;
+    margin: 0; padding: 16px 16px 88px;
     background: var(--bg); color: var(--text);
-    font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font: 15px/1.4 "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
-  h1 { font-size: 22px; margin: 0 0 12px; }
-  h2 { font-size: 17px; margin: 20px 0 8px; }
+  h1, h2, .num { font-family: "Inter Display", "Inter", system-ui, sans-serif; font-weight: 700; }
+  h1 { font-size: 26px; margin: 4px 0 16px; }
+  h2 { font-size: 18px; margin: 24px 0 10px; }
   .hint { color: var(--hint); font-size: 13px; }
   .hidden { display: none !important; }
+  .i { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8;
+       stroke-linecap: round; stroke-linejoin: round; flex: none; }
 
-  .totals, .stats {
-    display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+  button {
+    font: inherit; border: 0; border-radius: 12px; min-height: 44px; padding: 10px 16px;
+    background: var(--card); color: var(--text); cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
   }
-  .tile { background: var(--card); border-radius: 12px; padding: 10px; }
-  .tile b { display: block; font-size: 18px; }
+  button.primary { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+  button.wide { width: 100%; }
+  button.danger { color: var(--danger); }
+  button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .tile { background: var(--card); border-radius: 14px; padding: 12px; }
+  .tile b { display: block; font: 700 20px/1.2 "Inter Display", "Inter", sans-serif; }
   .tile span { color: var(--hint); font-size: 12px; }
 
-  .ride {
-    background: var(--card); border-radius: 12px; padding: 12px;
-    margin-bottom: 8px; cursor: pointer;
-    display: flex; justify-content: space-between; align-items: center;
-  }
-  .ride .date { font-weight: 600; }
-  .ride .meta { color: var(--hint); font-size: 13px; }
-  .ride .km { font-size: 18px; font-weight: 700; white-space: nowrap; }
-  .live {
-    display: inline-block; background: #e53935; color: #fff;
-    border-radius: 6px; padding: 1px 6px; font-size: 11px; margin-left: 6px;
-    animation: pulse 1.5s infinite;
-  }
-  @keyframes pulse { 50% { opacity: .5; } }
+  .chips { display: flex; gap: 8px; overflow-x: auto; margin-bottom: 12px; }
+  .chips button { flex: 1; min-width: 0; padding: 8px 6px; gap: 6px; font-size: 13px; }
+  .chips button[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); font-weight: 600; }
 
-  #map { height: 52vh; border-radius: 12px; margin-bottom: 12px; }
-  .empty { text-align: center; padding: 32px 8px; color: var(--hint); }
-  .steps { text-align: left; color: var(--text); margin: 12px auto 0; max-width: 320px; }
-  .steps li { margin-bottom: 6px; }
+  .row {
+    background: var(--card); border-radius: 14px; padding: 12px; margin-bottom: 8px;
+    display: flex; gap: 12px; align-items: center; width: 100%; text-align: left; justify-content: flex-start;
+  }
+  .row .grow { flex: 1; min-width: 0; }
+  .row .meta { display: block; color: var(--hint); font-size: 13px; }
+  .row .km { font: 700 20px "Inter Display", "Inter", sans-serif; white-space: nowrap; }
+  .badge {
+    display: inline-block; background: var(--danger); color: #fff; border-radius: 6px;
+    padding: 1px 6px; font-size: 11px; margin-left: 6px; vertical-align: middle;
+  }
+  .badge.live { animation: pulse 1.5s infinite; }
+  @keyframes pulse { 50% { opacity: .5; } }
+  @media (prefers-reduced-motion: reduce) { .badge.live { animation: none; } }
+
+  /* Экран тренировки: цифры читаются на ходу. */
+  .big { text-align: center; margin: 8px 0 16px; }
+  .big .num { font-size: 72px; line-height: 1; letter-spacing: -1px; }
+  .big .pair { display: grid; grid-template-columns: 1fr 1fr; margin-top: 16px; }
+  .big .pair .num { font-size: 44px; }
+  .big .label { color: var(--hint); font-size: 14px; margin-top: 4px; }
+
+  #map, .map { height: 46vh; border-radius: 14px; margin-bottom: 12px; background: var(--card); }
+  .swatch { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--on-accent); flex: none; }
+  #map.small { height: 30vh; }
+  [data-theme="dark"] .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.85) contrast(.9); }
+
+  .split { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; font-size: 14px; }
+  .split .bar { flex: 1; height: 8px; border-radius: 4px; background: var(--card); overflow: hidden; }
+  .split .bar i { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+  .split .km { width: 44px; color: var(--hint); }
+  .split .t { width: 72px; text-align: right; font-variant-numeric: tabular-nums; }
+
+  .steps { list-style: none; padding: 0; margin: 12px 0; }
+  .steps li { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .steps .i { width: 40px; height: 40px; padding: 8px; border-radius: 12px; background: var(--accent); color: var(--on-accent); }
 
   .weight-row { display: flex; gap: 8px; align-items: center; }
   .weight-row input {
-    width: 90px; padding: 8px 10px; font-size: 15px;
-    border: 1px solid var(--hint); border-radius: 10px;
-    background: var(--bg); color: var(--text);
+    width: 96px; min-height: 44px; padding: 8px 10px; font: inherit;
+    border: 1px solid var(--hint); border-radius: 12px; background: var(--bg); color: var(--text);
   }
-  button {
-    border: 0; border-radius: 10px; padding: 9px 14px; font-size: 15px;
-    background: var(--accent); color: var(--accent-text); cursor: pointer;
+  a { color: var(--ink); }
+  .error { color: var(--danger); margin: 12px 0; }
+
+  nav {
+    position: fixed; left: 0; right: 0; bottom: 0; display: flex; z-index: 500;
+    background: var(--bg); border-top: 1px solid var(--card);
+    padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
   }
-  #more { width: 100%; }
-  a { color: var(--accent); }
-  .error { color: #e53935; margin: 12px 0; }
+  nav button { flex: 1; flex-direction: column; gap: 2px; background: none; color: var(--hint); font-size: 11px; padding: 4px; }
+  nav button[aria-current="page"] { color: var(--ink); }
+
+  button.sos { background: var(--danger); color: #fff; font-weight: 700; min-height: 56px; margin-bottom: 12px; }
+  .rec-row button { min-height: 36px; padding: 6px 12px; font-size: 13px; }
+  .record { display: flex; align-items: center; gap: 8px; color: var(--ink); font-weight: 600; margin: -8px 0 12px; }
+  .rec-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--card); }
+  .rec-row b { font-family: "Inter Display", "Inter", sans-serif; }
+
+  .sheet { position: fixed; inset: 0; background: var(--bg); padding: 24px 16px; overflow: auto; z-index: 1000; }
 </style>
 </head>
 <body>
 
-<!-- Список поездок -->
-<section id="list-view">
-  <h1>🚴 Мои поездки</h1>
-  <div class="totals" id="totals"></div>
-  <h2>История</h2>
-  <div id="rides"></div>
-  <button id="more" class="hidden">Показать ещё</button>
+<section id="home" data-tab>
+  <h1>Be. Out!</h1>
+  <div id="active-card"></div>
+  <div class="chips" id="home-kinds" role="group" aria-label="Тип тренировки"></div>
+  <button class="primary wide" id="start">Начать тренировку</button>
+  <p></p>
+  <button class="wide" id="together"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.6 2.9-5.5 6.5-5.5s6.5 1.9 6.5 5.5"/><circle cx="17" cy="9" r="2.5"/><path d="M17 14.5c2.6 0 4.5 1.4 4.5 4.5"/></svg>Совместная тренировка</button>
+  <h2>Последняя тренировка</h2>
+  <div id="last-ride"></div>
+  <p class="hint" id="streak"></p>
+  <h2>Эта неделя</h2>
+  <div id="week"></div>
+  <h2>Этот месяц</h2>
+  <div id="month"></div>
+</section>
 
-  <h2>Настройки</h2>
+<section id="history" data-tab class="hidden">
+  <h1>История</h1>
+  <div class="chips" id="history-kinds" role="group" aria-label="Фильтр по типу"></div>
+  <div id="rides"></div>
+  <button class="wide hidden" id="more">Показать ещё</button>
+</section>
+
+<section id="profile" data-tab class="hidden">
+  <h1>Профиль</h1>
+  <h2>Вес</h2>
   <div class="weight-row">
-    <label for="weight">Вес, кг</label>
+    <label for="weight" class="hint">кг</label>
     <input id="weight" type="number" inputmode="decimal" min="30" max="250" step="0.5">
     <button id="save-weight">Сохранить</button>
   </div>
-  <p class="hint">Вес нужен для расчёта калорий. Это примерная оценка по скорости (метод MET).</p>
-
+  <p class="hint">Нужен для оценки калорий по методу MET: это примерная оценка, а не медицинский расчёт.</p>
+  <h2>Тип по умолчанию</h2>
+  <div class="chips" id="profile-kinds" role="group" aria-label="Тип по умолчанию"></div>
+  <h2>Личные рекорды</h2>
+  <div id="records"></div>
+  <h2>Экстренные контакты (SOS)</h2>
+  <p class="hint">Контакт сам открывает ссылку и соглашается. Кнопка SOS — на экране идущей тренировки:
+    контакты получат твою последнюю геопозицию. Это не вызов экстренных служб — в опасности звони 112.</p>
+  <div id="sos-contacts"></div>
+  <p></p>
+  <button class="wide" id="sos-invite">Пригласить контакт</button>
   <h2>Мои данные</h2>
   <p class="hint">Выгрузить все данные — /export, удалить всё — /delete в чате с ботом.<br>
     <a href="/privacy" id="privacy-link">Условия и политика конфиденциальности</a></p>
 </section>
 
-<!-- Одна поездка -->
-<section id="ride-view" class="hidden">
-  <h1 id="ride-title">Поездка</h1>
+<section id="ride" class="hidden">
+  <div class="chips" id="ride-kinds" role="group" aria-label="Тип тренировки"></div>
+  <h1 id="ride-title"></h1>
+  <div id="ride-records"></div>
+  <div id="ride-live"></div>
+  <button class="wide sos hidden" id="sos"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17v.01"/></svg>SOS — экстренным контактам</button>
   <div id="map"></div>
-  <div class="stats" id="ride-stats"></div>
+  <div class="grid" id="ride-stats"></div>
+  <div id="ride-actions" class="hidden">
+    <p></p>
+    <button class="primary wide" id="share"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13v7h16v-7M12 3v12M7 8l5-5 5 5"/></svg>Поделиться карточкой</button>
+  </div>
+  <div id="splits"></div>
   <p class="hint" id="ride-hint"></p>
+  <button class="wide danger hidden" id="delete"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/></svg>Удалить тренировку</button>
 </section>
 
-<div class="error hidden" id="error"></div>
+<section id="session" class="hidden">
+  <h1>Совместная тренировка</h1>
+  <p class="hint">Каждый запускает трансляцию геопозиции в чате с ботом — тренировка сама привяжется
+    к этой сессии (в течение 12 часов после создания). Маршруты видят только участники.</p>
+  <div id="session-map" class="map"></div>
+  <div id="session-people"></div>
+  <p></p>
+  <button class="wide" id="invite">Пригласить ещё</button>
+</section>
+
+<div class="error hidden" id="error" role="alert"></div>
+
+<nav id="tabs">
+  <button data-go="home" aria-current="page"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5.5 9v12h13V9"/></svg>Главная</button>
+  <button data-go="history"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg>История</button>
+  <button data-go="profile"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6 8-6s8 2 8 6"/></svg>Профиль</button>
+</nav>
+
+<div class="sheet hidden" id="onboarding" role="dialog" aria-labelledby="onb-title">
+  <h1 id="onb-title">Как начать тренировку</h1>
+  <p class="hint">Запись идёт через трансляцию геопозиции в чате с ботом — даже с заблокированным экраном.</p>
+  <ol class="steps" id="onb-steps"></ol>
+  <button class="primary wide" id="onb-go">Перейти в чат</button>
+  <p></p>
+  <button class="wide" id="onb-close">Понятно</button>
+</div>
 
 <script>
 const tg = window.Telegram && window.Telegram.WebApp;
-if (tg) { tg.ready(); tg.expand(); }
-
 const $ = (id) => document.getElementById(id);
-let map = null, routeLayer = null, refreshTimer = null;
+
+// ---------- иконки: один набор линейных SVG ----------
+const ICONS = {
+  ride: '<circle cx="5.5" cy="17" r="3.5"/><circle cx="18.5" cy="17" r="3.5"/><path d="M5.5 17 9 9.5h6.5L18.5 17M9 9.5 12 17l3.5-7.5M8 6.5h3"/>',
+  run: '<circle cx="15" cy="4.5" r="2"/><path d="M5 12.5 8.5 9l4 .5 2.5 3.5h3.5M12.5 9.5 10 15l3.5 2.5V22M10 15l-3 6"/>',
+  walk: '<circle cx="13" cy="4.5" r="2"/><path d="m8 21 3-8 3 3v5M8.5 12l1.5-4 3.5.5 1.5 4 2 1M11 13l1.5-4.5"/>',
+  clip: '<path d="M20.5 11.5 12.4 19.6a5 5 0 0 1-7-7l8.2-8.2a3.4 3.4 0 0 1 4.8 4.8l-8.2 8.2a1.7 1.7 0 0 1-2.4-2.4l7.5-7.5"/>',
+  pin: '<path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/>',
+  live: '<circle cx="12" cy="12" r="2"/><path d="M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  play: '<path d="M7 4.5v15L19 12z"/>',
+  trophy: '<path d="M8 4h8v5a4 4 0 0 1-8 0zM8 6H4.5a3.5 3.5 0 0 0 3.8 4M16 6h3.5a3.5 3.5 0 0 1-3.8 4M12 13v4M8 21h8M9.5 17h5"/>',
+};
+// Личные рекорды: подпись и формат значения.
+const RECORDS = {
+  distance_km: ["Самая длинная", (v) => `${v} км`],
+  max_speed_kmh: ["Максимальная скорость", (v) => `${v} км/ч`],
+  best_1k_s: ["Лучший 1 км", fmtDuration],
+  best_5k_s: ["Лучшие 5 км", fmtDuration],
+};
+function plural(n, one, few, many) {
+  const m10 = n % 10, m100 = n % 100;
+  return `${n} ${m10 === 1 && m100 !== 11 ? one : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? few : many}`;
+}
+const confirmDialog = (text) => tg ? new Promise((ok) => tg.showConfirm(text, ok)) : Promise.resolve(confirm(text));
+const icon = (name) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
+const KINDS = { ride: "Велосипед", run: "Бег", walk: "Ходьба" };
+
+// ---------- тема ----------
+function applyTheme() {
+  const dark = tg ? tg.colorScheme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  if (!tg) return;
+  const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
+  tg.setHeaderColor(bg);
+  tg.setBackgroundColor(bg);
+  tg.MainButton.setParams({ color: "#C6F432", text_color: "#0E1116" });
+}
+if (tg) { tg.ready(); tg.expand(); tg.onEvent("themeChanged", applyTheme); }
+applyTheme();
 
 // ---------- API ----------
 async function api(path, options = {}) {
   const res = await fetch(path, {
     ...options,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Init-Data": (tg && tg.initData) || "",
-      ...(options.headers || {}),
-    },
+    headers: { "Content-Type": "application/json", "X-Init-Data": (tg && tg.initData) || "", ...(options.headers || {}) },
   });
   if (!res.ok) throw new Error((await res.text()) || `Ошибка ${res.status}`);
   return res.json();
 }
-
 function showError(err) {
   $("error").textContent = err.message || String(err);
   $("error").classList.remove("hidden");
 }
+const haptic = (type) => tg && tg.HapticFeedback.notificationOccurred(type);
+const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body || {}) });
 
 // ---------- форматирование ----------
 function fmtDuration(s) {
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60);
   const pad = (n) => String(n).padStart(2, "0");
   return h ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
 }
+const fmtPace = (kmh) => (kmh ? fmtDuration(Math.round(3600 / kmh)) : "–");
 function fmtDate(ts) {
-  return new Date(ts * 1000).toLocaleString("ru-RU", {
-    day: "numeric", month: "long", hour: "2-digit", minute: "2-digit",
-  });
+  return new Date(ts * 1000).toLocaleString("ru-RU", { day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" });
 }
-function tile(value, label) {
-  return `<div class="tile"><b>${value}</b><span>${label}</span></div>`;
+const tile = (value, label) => `<div class="tile"><b>${value}</b><span>${label}</span></div>`;
+// Велосипед — скорость, бег и ходьба — темп.
+const speedOf = (r) => r.kind === "ride" ? `${r.avg_speed_kmh} км/ч` : `${fmtPace(r.avg_speed_kmh)} /км`;
+
+function kindChips(el, selected, onPick, all) {
+  const options = all ? { "": "Все", ...KINDS } : KINDS;
+  el.innerHTML = Object.entries(options).map(([k, title]) =>
+    `<button data-kind="${k}" aria-pressed="${k === selected}">${k ? icon(k) : ""}${title}</button>`).join("");
+  el.onclick = (e) => {
+    const b = e.target.closest("button");
+    if (!b || b.getAttribute("aria-pressed") === "true") return;
+    if (tg) tg.HapticFeedback.selectionChanged();
+    onPick(b.dataset.kind).catch(showError);
+  };
 }
 
-// ---------- список ----------
-async function showList() {
+// ---------- навигация ----------
+let current = "home";
+function show(id) {
+  current = id;
   stopRefresh();
   setFinish(null);
-  if (tg) tg.BackButton.hide();
-  $("ride-view").classList.add("hidden");
-  $("list-view").classList.remove("hidden");
+  document.querySelectorAll("section").forEach((s) => s.classList.toggle("hidden", s.id !== id));
+  const tab = $(id).hasAttribute("data-tab");
+  $("tabs").classList.toggle("hidden", !tab);
+  document.querySelectorAll("nav button").forEach((b) =>
+    b.dataset.go === id ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current"));
+  if (tg) tab ? tg.BackButton.hide() : tg.BackButton.show();
+  $("error").classList.add("hidden");
+  window.scrollTo(0, 0);
+}
+const SCREENS = { home: showHome, history: showHistory, profile: showProfile };
+$("tabs").addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (b) SCREENS[b.dataset.go]().catch(showError);
+});
+if (tg) tg.BackButton.onClick(() => showHome().catch(showError));
 
-  const data = await api("/api/rides");
-  $("weight").value = data.weight;
+// ---------- главная ----------
+let me = null; // вес, тип по умолчанию, первая страница тренировок
+async function loadMe() { me = await api("/api/rides"); return me; }
 
-  const t = data.totals;
-  $("totals").innerHTML =
-    tile(t.distance_km, "км всего") +
-    tile(fmtDuration(t.moving_s), "в движении") +
-    tile(t.kcal, "ккал");
+function rideRow(r) {
+  return `<button class="row" data-id="${r.id}">${icon(r.kind)}
+    <span class="grow"><b>${fmtDate(r.started_at)}</b>${r.active ? '<span class="badge live">LIVE</span>' : ""}
+      <span class="meta">${KINDS[r.kind]} · ${fmtDuration(r.moving_s)} · ${speedOf(r)}</span></span>
+    <span class="km">${r.distance_km} км</span></button>`;
+}
+document.addEventListener("click", (e) => {
+  const row = e.target.closest(".row[data-id]");
+  if (row) showRide(row.dataset.id).catch(showError);
+});
 
-  $("rides").innerHTML = data.rides.length ? data.rides.map(rideHtml).join("") :
-    `<div class="empty"><b>Как начать</b>
-      <ol class="steps">
-        <li>В чате с ботом нажми скрепку → «Геопозиция».</li>
-        <li>Выбери «Транслировать геопозицию» и срок с запасом.</li>
-        <li>Двигайся — телефон можно убрать в карман.</li>
-        <li>В конце нажми «Финиш» здесь или в чате.</li>
-      </ol></div>`;
-  setMore(data);
+const pickDefaultKind = (then) => async (kind) => { await post("/api/kind", { kind }); await then(); };
+
+// Итоги недели/месяца по времени телефона: сервер не знает часовой пояс.
+const summary = () => api(`/api/summary?tz=${new Date().getTimezoneOffset()}`);
+
+function periodHtml(totals) {
+  const kinds = Object.keys(KINDS).filter((k) => totals[k]);
+  return kinds.length ? kinds.map((k) => `<div class="row">${icon(k)}
+    <span class="grow">${KINDS[k]}<span class="meta">${plural(totals[k].count, "тренировка", "тренировки", "тренировок")} · ${fmtDuration(totals[k].moving_s)}</span></span>
+    <span class="km">${totals[k].distance_km} км</span></div>`).join("") : '<p class="hint">Пока ничего.</p>';
 }
 
-function rideHtml(r) {
-  return `
-    <div class="ride" data-id="${r.id}">
-      <div>
-        <div class="date">${fmtDate(r.started_at)}${r.active ? '<span class="live">LIVE</span>' : ""}</div>
-        <div class="meta">${fmtDuration(r.moving_s)} · ${r.avg_speed_kmh} км/ч · ${r.kcal} ккал</div>
-      </div>
-      <div class="km">${r.distance_km} км</div>
-    </div>`;
+async function showHome() {
+  show("home");
+  const [, sum] = await Promise.all([loadMe(), summary()]);
+  const last = me.rides[0];
+  $("active-card").innerHTML = last && last.active ? rideRow(last) : "";
+  $("last-ride").innerHTML = !last ? '<p class="hint">Пока пусто — самое время начать.</p>' : last.active ? "" : rideRow(last);
+  kindChips($("home-kinds"), me.kind, pickDefaultKind(showHome));
+  $("together").lastChild.textContent = me.session_id ? "Открыть совместную тренировку" : "Совместная тренировка";
+  $("streak").textContent = sum.streak_days || sum.streak_weeks
+    ? `Серия: ${plural(sum.streak_days, "день", "дня", "дней")} · ${plural(sum.streak_weeks, "неделя", "недели", "недель")} подряд`
+    : "";
+  $("week").innerHTML = periodHtml(sum.week);
+  $("month").innerHTML = periodHtml(sum.month);
 }
 
-// Следующая страница — поездки старше последней показанной.
-let lastStartedAt = null;
-function setMore(data) {
+// ---------- онбординг: при первом запуске и по кнопке «Начать» ----------
+$("onb-steps").innerHTML = [
+  ["clip", "В чате с ботом нажми скрепку"],
+  ["pin", "Выбери «Геопозиция»"],
+  ["live", "Нажми «Транслировать геопозицию»"],
+  ["clock", "Выбери время с запасом"],
+  ["play", "Старт! Телефон можно убрать в карман"],
+].map(([i, text]) => `<li>${icon(i)}<span>${text}</span></li>`).join("");
+function onboarding(open) {
+  $("onboarding").classList.toggle("hidden", !open);
+  if (!open) localStorage.setItem("onboarded", "1");
+}
+$("start").addEventListener("click", () => { if (tg) tg.HapticFeedback.impactOccurred("medium"); onboarding(true); });
+$("onb-close").addEventListener("click", () => onboarding(false));
+$("onb-go").addEventListener("click", () => { onboarding(false); if (tg) tg.close(); });
+
+// ---------- история ----------
+let lastStartedAt = null, historyKind = "";
+const ridesUrl = (before) => `/api/rides?${new URLSearchParams({ ...(historyKind && { kind: historyKind }), ...(before && { before }) })}`;
+function appendRides(data, reset) {
+  const html = data.rides.map(rideRow).join("");
+  if (reset) $("rides").innerHTML = html || '<p class="hint">Тренировок пока нет.</p>';
+  else $("rides").insertAdjacentHTML("beforeend", html);
   if (data.rides.length) lastStartedAt = data.rides[data.rides.length - 1].started_at;
   $("more").classList.toggle("hidden", !data.has_more);
 }
-
+async function showHistory() {
+  show("history");
+  kindChips($("history-kinds"), historyKind, async (kind) => { historyKind = kind; await showHistory(); }, true);
+  appendRides(await api(ridesUrl()), true);
+}
 $("more").addEventListener("click", async () => {
+  try { appendRides(await api(ridesUrl(lastStartedAt)), false); } catch (e) { showError(e); }
+});
+
+// ---------- профиль ----------
+// Экстренные контакты: приглашение одноразовое, после согласия контакта ссылка меняется.
+let sosInvite = null;
+async function loadSos() {
+  const sos = await api("/api/sos");
+  sosInvite = sos.invite;
+  $("sos-contacts").innerHTML = sos.contacts.map((c) => `<div class="rec-row"><span>${esc(c.name)}</span>
+    <button class="danger" data-contact="${c.id}" aria-label="Удалить контакт ${esc(c.name)}">Удалить</button></div>`).join("")
+    || '<p class="hint">Пока нет контактов.</p>';
+}
+$("sos-contacts").addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-contact]");
+  if (!b || !(await confirmDialog("Удалить экстренный контакт?"))) return;
+  try { await api(`/api/sos/${b.dataset.contact}`, { method: "DELETE" }); await loadSos(); } catch (err) { showError(err); }
+});
+$("sos-invite").addEventListener("click", () => {
+  const text = "Стань моим экстренным контактом: если я нажму SOS на тренировке, бот пришлёт тебе мою геопозицию.";
+  const url = `https://t.me/share/url?url=${encodeURIComponent(sosInvite)}&text=${encodeURIComponent(text)}`;
+  tg ? tg.openTelegramLink(url) : window.open(url);
+});
+$("sos").addEventListener("click", async () => {
+  if (!(await confirmDialog("Отправить SOS экстренным контактам? Они получат твою последнюю геопозицию."))) return;
   try {
-    const data = await api(`/api/rides?before=${lastStartedAt}`);
-    $("rides").insertAdjacentHTML("beforeend", data.rides.map(rideHtml).join(""));
-    setMore(data);
-  } catch (e) { showError(e); }
+    const r = await post("/api/sos/send");
+    haptic(r.sent ? "success" : "error");
+    const text = `SOS отправлен: ${r.sent} из ${r.total}.`;
+    tg ? tg.showAlert(text) : alert(text);
+  } catch (e) { haptic("error"); showError(e); }
 });
 
-$("rides").addEventListener("click", (e) => {
-  const el = e.target.closest(".ride");
-  if (el) showRide(el.dataset.id).catch(showError);
+async function showProfile() {
+  show("profile");
+  const [, sum] = await Promise.all([loadMe(), summary(), loadSos()]);
+  $("weight").value = me.weight;
+  kindChips($("profile-kinds"), me.kind, pickDefaultKind(showProfile));
+  $("records").innerHTML = Object.keys(KINDS).filter((k) => sum.records[k]).map((k) =>
+    `<p class="hint">${KINDS[k]}</p>` + Object.entries(sum.records[k]).filter(([, v]) => v).map(([key, v]) =>
+      `<div class="rec-row"><span>${RECORDS[key][0]}</span><b>${RECORDS[key][1](v)}</b></div>`).join("")
+  ).join("") || '<p class="hint">Появятся после первых тренировок.</p>';
+}
+$("save-weight").addEventListener("click", async () => {
+  try { await post("/api/weight", { weight: Number($("weight").value) }); haptic("success"); } catch (e) { showError(e); }
 });
-
-// Внутри Telegram открываем во встроенном браузере, чтобы не уходить из Mini App.
 $("privacy-link").addEventListener("click", (e) => {
   if (!tg) return;
   e.preventDefault();
-  tg.openLink(new URL("/privacy", location.href).href);
+  tg.openLink(new URL("/privacy", location.href).href); // встроенный браузер, без выхода из Mini App
 });
 
-// ---------- поездка ----------
+// ---------- тренировка: идёт — крупные цифры, завершена — итоги ----------
+let map = null, routeLayer = null, refreshTimer = null;
+function makeMap(id) {
+  const m = L.map(id, { zoomControl: false });
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(m);
+  return [m, L.layerGroup().addTo(m)];
+}
+// Тёмная подложка: салатовая и белая линии читаются и на светлой карте.
+function drawLine(layer, latlngs, color) {
+  L.polyline(latlngs, { color: "#0E1116", weight: 8, opacity: 0.5 }).addTo(layer);
+  L.polyline(latlngs, { color, weight: 5 }).addTo(layer);
+}
+const dot = (layer, ll, fill, label, permanent) => L.circleMarker(ll, { radius: 7, color: "#0E1116", fillColor: fill, fillOpacity: 1, weight: 2 })
+  .bindTooltip(label, { permanent }).addTo(layer);
+
 async function showRide(id) {
-  $("list-view").classList.add("hidden");
-  $("ride-view").classList.remove("hidden");
-  if (tg) tg.BackButton.show();
-
-  if (!map) {
-    map = L.map("map", { zoomControl: false });
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 19, attribution: "© OpenStreetMap",
-    }).addTo(map);
-    routeLayer = L.layerGroup().addTo(map);
-  }
-  map.invalidateSize(); // карта была в скрытом блоке
-
+  show("ride");
+  if (!map) [map, routeLayer] = makeMap("map");
   await renderRide(id, true);
-  stopRefresh();
   refreshTimer = setInterval(() => renderRide(id, false).catch(showError), 15000);
 }
 
 async function renderRide(id, fitView) {
   const { ride, points } = await api(`/api/rides/${id}`);
-  if ($("ride-view").classList.contains("hidden")) return; // пока ждали ответ, ушли к списку
+  if (current !== "ride") return; // пока ждали ответ, ушли с экрана
   setFinish(ride);
+  kindChips($("ride-kinds"), ride.kind, async (kind) => {
+    await post(`/api/rides/${id}/kind`, { kind });
+    await renderRide(id, false);
+  });
+  $("ride-title").innerHTML = fmtDate(ride.started_at) + (ride.active ? '<span class="badge live">LIVE</span>' : "");
+  const fast = ride.kind === "ride"
+    ? [`${ride.avg_speed_kmh}`, "ср. км/ч", `${ride.max_speed_kmh}`, "макс. км/ч"]
+    : [fmtPace(ride.avg_speed_kmh), "темп /км", fmtPace(ride.max_speed_kmh), "лучший /км"];
 
-  $("ride-title").innerHTML = fmtDate(ride.started_at) +
-    (ride.active ? '<span class="live">LIVE</span>' : "");
-  $("ride-stats").innerHTML =
-    tile(ride.distance_km, "км") +
-    tile(fmtDuration(ride.duration_s), "всего") +
-    tile(fmtDuration(ride.moving_s), "в движении") +
-    tile(ride.avg_speed_kmh, "ср. км/ч") +
-    tile(ride.max_speed_kmh, "макс. км/ч") +
-    tile(ride.kcal, "ккал");
-  $("ride-hint").textContent = ride.active
-    ? "Поездка идёт — данные обновляются каждые 15 секунд."
-    : `Точек маршрута: ${points.length}`;
+  $("map").classList.toggle("small", ride.active);
+  $("ride-live").innerHTML = ride.active ? `<div class="big">
+      <div class="num">${fmtDuration(ride.moving_s)}</div><div class="label">в движении</div>
+      <div class="pair"><div><div class="num">${ride.distance_km}</div><div class="label">км</div></div>
+        <div><div class="num">${fast[0]}</div><div class="label">${fast[1]}</div></div></div></div>` : "";
+  $("ride-actions").classList.toggle("hidden", ride.active);
+  $("sos").classList.toggle("hidden", !ride.active);
+  $("delete").classList.toggle("hidden", ride.active);
+  shareRideId = ride.id;
+  $("ride-records").innerHTML = ride.records.map((key) =>
+    `<div class="record">${icon("trophy")}Новый рекорд: ${RECORDS[key][0].toLowerCase()}</div>`).join("");
+  if (fitView && ride.records.length) haptic("success");
+  $("ride-stats").innerHTML = ride.active ? "" :
+    tile(ride.distance_km, "км") + tile(fmtDuration(ride.moving_s), "в движении") + tile(fmtDuration(ride.duration_s), "всего") +
+    tile(fast[0], fast[1]) + tile(fast[2], fast[3]) + tile(`≈ ${ride.kcal}`, "ккал") +
+    (ride.elevation_gain_m != null ? tile(ride.elevation_gain_m, "м набора высоты") : "");
 
+  const best = Math.min(...ride.splits);
+  $("splits").innerHTML = ride.kind !== "ride" && ride.splits.length ? "<h2>Сплиты</h2>" + ride.splits.map((s, i) =>
+    `<div class="split"><span class="km">${i + 1} км</span><span class="bar"><i style="width:${Math.round(best / s * 100)}%"></i></span>
+      <span class="t">${fmtDuration(s)}</span></div>`).join("") : "";
+  $("ride-hint").textContent = ride.active ? "Тренировка идёт — данные обновляются каждые 15 секунд." : `Точек маршрута: ${points.length}`;
+
+  map.invalidateSize(); // карта была в скрытом блоке или поменяла высоту
   routeLayer.clearLayers();
   if (!points.length) { map.setView([52.23, 21.01], 12); return; }
-
   const latlngs = points.map((p) => [p[0], p[1]]);
-  const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#2ea6ff";
-  L.polyline(latlngs, { color: accent, weight: 5 }).addTo(routeLayer);
-  L.circleMarker(latlngs[0], { radius: 7, color: "#fff", fillColor: "#43a047", fillOpacity: 1, weight: 2 })
-    .bindTooltip("Старт").addTo(routeLayer);
-  L.circleMarker(latlngs[latlngs.length - 1], { radius: 7, color: "#fff", fillColor: ride.active ? "#e53935" : "#222", fillOpacity: 1, weight: 2 })
-    .bindTooltip(ride.active ? "Сейчас" : "Финиш").addTo(routeLayer);
-
-  if (fitView) {
-    if (latlngs.length > 1) map.fitBounds(latlngs, { padding: [24, 24] });
-    else map.setView(latlngs[0], 15);
-  }
+  drawLine(routeLayer, latlngs, "#C6F432");
+  dot(routeLayer, latlngs[0], "#FFFFFF", "Старт");
+  dot(routeLayer, latlngs[latlngs.length - 1], "#C6F432", ride.active ? "Сейчас" : "Финиш");
+  if (fitView) latlngs.length > 1 ? map.fitBounds(latlngs, { padding: [24, 24] }) : map.setView(latlngs[0], 15);
 }
+
+// ---------- совместная тренировка: одна карта на всех участников ----------
+const esc = (s) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`); // имена приходят из Telegram
+const COLORS = ["#FFFFFF", "#5EC8FF", "#FF8A5B", "#B98CFF", "#FFD23F"]; // ты — всегда салатовый
+let sessionMap = null, sessionLayer = null, sessionLink = null;
+
+async function showSession(id) {
+  show("session");
+  if (!sessionMap) [sessionMap, sessionLayer] = makeMap("session-map");
+  await renderSession(id, true);
+  refreshTimer = setInterval(() => renderSession(id, false).catch(showError), 15000);
+}
+
+async function renderSession(id, fitView) {
+  const data = await api(`/api/sessions/${id}`);
+  if (current !== "session") return;
+  sessionLink = data.link;
+  let other = 0;
+  const people = data.participants.map((p) => ({ ...p, color: p.you ? "#C6F432" : COLORS[other++ % COLORS.length] }));
+  const total = people.reduce((sum, p) => sum + (p.ride ? p.ride.distance_km : 0), 0);
+  $("session-people").innerHTML = `<h2>Вместе: ${total.toFixed(2)} км</h2>` + people.map((p) => `<div class="row">
+      <span class="swatch" style="background:${p.color}"></span>
+      <span class="grow">${esc(p.name)}${p.you ? " (ты)" : ""}${p.ride && p.ride.active ? '<span class="badge live">LIVE</span>' : ""}
+        <span class="meta">${p.ride ? `${KINDS[p.ride.kind]} · ${fmtDuration(p.ride.moving_s)} · ${speedOf(p.ride)}` : "ещё не начал(а) трансляцию"}</span></span>
+      <span class="km">${p.ride ? p.ride.distance_km : 0} км</span></div>`).join("");
+
+  sessionMap.invalidateSize();
+  sessionLayer.clearLayers();
+  const all = [];
+  for (const p of people.filter((p) => p.points.length)) {
+    drawLine(sessionLayer, p.points, p.color);
+    dot(sessionLayer, p.points[p.points.length - 1], p.color, esc(p.name), true);
+    all.push(...p.points);
+  }
+  if (!all.length) sessionMap.setView([52.23, 21.01], 12);
+  else if (fitView) all.length > 1 ? sessionMap.fitBounds(all, { padding: [32, 32] }) : sessionMap.setView(all[0], 15);
+}
+
+function invite() {
+  const text = "Тренируемся вместе: открой ссылку и запусти трансляцию геопозиции в чате с ботом.";
+  const url = `https://t.me/share/url?url=${encodeURIComponent(sessionLink)}&text=${encodeURIComponent(text)}`;
+  tg ? tg.openTelegramLink(url) : window.open(url);
+}
+$("invite").addEventListener("click", invite);
+$("together").addEventListener("click", async () => {
+  try {
+    if (tg) tg.HapticFeedback.impactOccurred("medium");
+    const s = me.session_id ? { id: me.session_id } : await post("/api/sessions");
+    await showSession(s.id);
+    if (!me.session_id) invite();
+  } catch (e) { showError(e); }
+});
+
+// Карточка приходит в чат с ботом; где Telegram умеет (Bot API 8.0+), сразу открывается выбор чата.
+let shareRideId = null;
+$("share").addEventListener("click", async () => {
+  if (tg) tg.HapticFeedback.impactOccurred("light");
+  $("share").disabled = true;
+  try {
+    const { prepared_id } = await post(`/api/rides/${shareRideId}/share`);
+    if (prepared_id && tg && tg.isVersionAtLeast("8.0")) tg.shareMessage(prepared_id, (sent) => sent && haptic("success"));
+    else if (tg) tg.showAlert("Карточка в чате с ботом — перешли её друзьям.");
+  } catch (e) { showError(e); }
+  $("share").disabled = false;
+});
+
+$("delete").addEventListener("click", async () => {
+  if (!(await confirmDialog("Удалить тренировку? Отменить это нельзя."))) return;
+  try {
+    await api(`/api/rides/${shareRideId}`, { method: "DELETE" });
+    haptic("warning");
+    await showHistory();
+  } catch (e) { showError(e); }
+});
 
 function stopRefresh() {
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
 }
 
-// Кнопка «Финиш» внизу экрана Telegram — только у идущей поездки, открытой сейчас.
+// «Финиш» — нативная кнопка Telegram внизу экрана: крупная, под большой палец.
 let finishRideId = null;
 function setFinish(ride) {
   finishRideId = ride && ride.active ? ride.id : null;
   if (!tg) return;
   if (finishRideId) tg.MainButton.setText("Финиш").show(); else tg.MainButton.hide();
 }
-
 if (tg) tg.MainButton.onClick(() => {
   const id = finishRideId;
-  tg.showConfirm("Завершить поездку?", async (ok) => {
+  tg.showConfirm("Завершить тренировку?", async (ok) => {
     if (!ok || !id) return;
     try {
-      await api(`/api/rides/${id}/finish`, { method: "POST" });
-      tg.HapticFeedback.notificationOccurred("success");
-      await renderRide(id, false);
+      await post(`/api/rides/${id}/finish`);
+      haptic("success");
+      await renderRide(id, true);
     } catch (e) { showError(e); }
   });
 });
 
-// ---------- настройки ----------
-$("save-weight").addEventListener("click", async () => {
-  try {
-    await api("/api/weight", { method: "POST", body: JSON.stringify({ weight: Number($("weight").value) }) });
-    if (tg) tg.HapticFeedback.notificationOccurred("success");
-    await showList();
-  } catch (e) { showError(e); }
-});
-
-if (tg) tg.BackButton.onClick(() => showList().catch(showError));
-
-// ---------- старт: ?ride=ID открывает сразу нужную поездку ----------
-const rideParam = new URLSearchParams(location.search).get("ride");
-(rideParam ? showRide(rideParam) : showList()).catch(showError);
+// ---------- старт: ?ride=ID — сразу эта тренировка; идущая открывается сама ----------
+(async () => {
+  const rideParam = new URLSearchParams(location.search).get("ride");
+  if (rideParam) return showRide(rideParam);
+  // Приглашение в совместную тренировку: t.me/<bot>?startapp=session_<token>.
+  const start = tg && tg.initDataUnsafe.start_param;
+  if (start && start.startsWith("session_")) {
+    await loadMe();
+    return showSession((await post(`/api/sessions/join/${encodeURIComponent(start.slice(8))}`)).id);
+  }
+  await showHome();
+  if (me.rides[0] && me.rides[0].active) return showRide(me.rides[0].id);
+  if (!localStorage.getItem("onboarded") && !me.rides.length) onboarding(true);
+})().catch(showError);
 </script>
 </body>
 </html>
