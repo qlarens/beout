@@ -30,7 +30,7 @@ from aiohttp import web
 
 from auth import validate_init_data
 from stats import compute_stats
-from settings import APP_NAME
+from settings import ACTIVITIES, APP_NAME
 from storage import STAT_KEYS, Storage
 
 # Секреты — только из окружения, чтобы токен не лежал в коде.
@@ -52,14 +52,15 @@ NETWORK_RETRY_S = 10
 FLOOD_MAX_WAIT_S = 600
 
 WEBAPP_DIR = Path(__file__).parent / "webapp"
+ASSETS_DIR = Path(__file__).parent / "assets"
 
 logging.basicConfig(level=logging.INFO)
 db = Storage(DB_PATH)
 dp = Dispatcher()
 
 COMMANDS = [
-    BotCommand(command="start", description="Как начать поездку"),
-    BotCommand(command="stop", description="Завершить поездку"),
+    BotCommand(command="start", description="Как начать тренировку"),
+    BotCommand(command="stop", description="Завершить тренировку"),
     BotCommand(command="weight", description="Вес для калорий: /weight 72"),
     BotCommand(command="privacy", description="Условия и конфиденциальность"),
     BotCommand(command="export", description="Выгрузить мои данные"),
@@ -97,11 +98,42 @@ def has_consent(user_id):
     return db.consent_version(user_id) >= POLICY_VERSION
 
 
+def fmt_pace(speed_kmh):
+    """Темп «5:30 /км» из скорости; без движения — прочерк."""
+    if not speed_kmh:
+        return "–"
+    m, s = divmod(int(round(3600 / speed_kmh)), 60)
+    return f"{m}:{s:02d} /км"
+
+
 def stats_of(ride):
-    """Статистика закрытой поездки хранится в базе, идущей — считается на лету."""
+    """Статистика закрытой тренировки хранится в базе, идущей — считается на лету."""
     if ride["ended_at"] is not None:
         return {k: ride[k] for k in STAT_KEYS}
-    return compute_stats(db.get_points(ride["id"]), db.get_weight(ride["user_id"]))
+    return compute_stats(db.get_points(ride["id"]), db.get_weight(ride["user_id"]), ride["kind"])
+
+
+def speed_line(ride, stats):
+    """Велосипед — скорость, бег и ходьба — темп."""
+    if ride["kind"] == "ride":
+        return f"Средняя: {stats['avg_speed_kmh']} км/ч, макс: {stats['max_speed_kmh']} км/ч"
+    return f"Темп: {fmt_pace(stats['avg_speed_kmh'])}, лучший: {fmt_pace(stats['max_speed_kmh'])}"
+
+
+def start_keyboard(ride):
+    """Под сообщением о старте: трекер, выбор типа (выбранный с галочкой), финиш."""
+    kinds = [
+        InlineKeyboardButton(
+            text=("✓ " if kind == ride["kind"] else "") + a["title"],
+            callback_data=f"kind:{ride['id']}:{kind}",
+        )
+        for kind, a in ACTIVITIES.items()
+    ]
+    return open_app_keyboard(
+        ride["id"], "📍 Смотреть в реальном времени",
+        kinds,
+        [InlineKeyboardButton(text="🏁 Финиш", callback_data=f"finish:{ride['id']}")],
+    )
 
 
 def open_app_keyboard(ride_id=None, text="🗺 Открыть трекер", *extra_rows):
@@ -122,11 +154,11 @@ def consent_keyboard():
 
 def welcome_text(user_id):
     return (
-        "Привет! Я записываю велопоездки 🚴\n\n"
-        "<b>Как начать поездку:</b>\n"
+        "Привет! Я записываю тренировки: велосипед, бег и ходьбу.\n\n"
+        "<b>Как начать тренировку:</b>\n"
         "1. Нажми 📎 → «Геопозиция» → «Транслировать геопозицию» "
         "и выбери срок с запасом.\n"
-        "2. Катайся — телефон можно убрать в карман. Следи за дорогой, а не за экраном.\n"
+        "2. Двигайся — телефон можно убрать в карман. Следи за дорогой, а не за экраном.\n"
         "3. В конце нажми «Финиш» (или останови трансляцию, или отправь /stop).\n\n"
         f"Вес для расчёта калорий: <b>{db.get_weight(user_id):g} кг</b>. Изменить: /weight 72\n"
         "Мои данные: /export, удалить всё: /delete."
@@ -136,12 +168,12 @@ def welcome_text(user_id):
 def ride_summary(ride):
     stats = stats_of(ride)
     return (
-        "🏁 <b>Поездка завершена</b>\n\n"
+        f"🏁 <b>{ACTIVITIES[ride['kind']]['title']}: тренировка завершена</b>\n\n"
         f"📏 Дистанция: <b>{stats['distance_km']} км</b>\n"
         f"⏱ Время: {fmt_duration(stats['duration_s'])} "
         f"(в движении {fmt_duration(stats['moving_s'])})\n"
-        f"⚡ Средняя: {stats['avg_speed_kmh']} км/ч, макс: {stats['max_speed_kmh']} км/ч\n"
-        f"🔥 Калории: ~<b>{stats['kcal']} ккал</b>"
+        f"⚡ {speed_line(ride, stats)}\n"
+        f"🔥 Калории: ≈ <b>{stats['kcal']} ккал</b>"
     )
 
 
@@ -278,6 +310,20 @@ async def cmd_stop(message: Message):
     await finish_and_report(message.bot, ride["id"])
 
 
+@dp.callback_query(F.data.regexp(r"^kind:\d+:(ride|run|walk)$"))
+async def on_kind(callback: CallbackQuery):
+    _, ride_id, kind = callback.data.split(":")
+    ride = db.get_ride(int(ride_id))
+    if not ride or ride["user_id"] != callback.from_user.id:
+        await callback.answer("Тренировка не найдена")
+        return
+    db.set_ride_kind(ride["id"], kind)
+    db.set_kind(ride["user_id"], kind)  # следующая тренировка начнётся с этого типа
+    if ride["ended_at"] is None and isinstance(callback.message, Message):
+        await callback.message.edit_reply_markup(reply_markup=start_keyboard(db.get_ride(ride["id"])))
+    await callback.answer(ACTIVITIES[kind]["title"])
+
+
 @dp.callback_query(F.data.regexp(r"^finish:\d+$"))
 async def on_finish(callback: CallbackQuery):
     ride = db.get_ride(int(callback.data.split(":")[1]))
@@ -315,15 +361,13 @@ async def on_location(message: Message):
         message_id=message.message_id,
         ts=ts,
         live_until=ts + loc.live_period,
+        kind=db.get_kind(message.from_user.id),
     )
     db.add_point(ride_id, ts, loc.latitude, loc.longitude, loc.horizontal_accuracy)
     await message.answer(
-        "🚴 Поездка началась, записываю маршрут!\n"
+        "Тренировка началась, записываю маршрут! Тип можно поменять кнопками ниже.\n"
         "Чтобы закончить, нажми «Финиш», останови трансляцию или отправь /stop.",
-        reply_markup=open_app_keyboard(
-            ride_id, "📍 Смотреть в реальном времени",
-            [InlineKeyboardButton(text="🏁 Финиш", callback_data=f"finish:{ride_id}")],
-        ),
+        reply_markup=start_keyboard(db.get_ride(ride_id)),
     )
 
 
@@ -368,6 +412,7 @@ def current_user_id(request):
 def ride_to_json(ride):
     return {
         "id": ride["id"],
+        "kind": ride["kind"],
         "started_at": ride["started_at"],
         "ended_at": ride["ended_at"],
         "active": ride["ended_at"] is None,
@@ -384,6 +429,7 @@ async def api_rides(request):
     rides = [ride_to_json(r) for r in db.list_rides(user_id, PAGE_SIZE, before)]
     return web.json_response({
         "weight": db.get_weight(user_id),
+        "kind": db.get_kind(user_id),
         "rides": rides,
         "has_more": len(rides) == PAGE_SIZE,
         "totals": db.totals(user_id),
@@ -402,10 +448,35 @@ def own_ride(request):
 async def api_ride(request):
     ride = own_ride(request)
     points = db.get_points(ride["id"])
+    splits = compute_stats(points, db.get_weight(ride["user_id"]), ride["kind"])["splits"]
     return web.json_response({
-        "ride": ride_to_json(ride),
+        "ride": {**ride_to_json(ride), "splits": splits},
         "points": [[lat, lon, ts] for ts, lat, lon in points],
     })
+
+
+async def read_kind(request):
+    try:
+        kind = (await request.json())["kind"]
+    except (KeyError, TypeError, ValueError):
+        kind = None
+    if kind not in ACTIVITIES:
+        raise web.HTTPBadRequest(text=f"kind: одно из {', '.join(ACTIVITIES)}")
+    return kind
+
+
+async def api_ride_kind(request):
+    ride = own_ride(request)
+    kind = await read_kind(request)
+    db.set_ride_kind(ride["id"], kind)
+    db.set_kind(ride["user_id"], kind)
+    return web.json_response({"ride": ride_to_json(db.get_ride(ride["id"]))})
+
+
+async def api_set_kind(request):
+    user_id = current_user_id(request)
+    db.set_kind(user_id, await read_kind(request))
+    return web.json_response({"kind": db.get_kind(user_id)})
 
 
 async def api_finish(request):
@@ -442,10 +513,13 @@ def make_web_app(bot):
     app[BOT_KEY] = bot  # итог по кнопке «Финиш» из Mini App уходит в чат
     app.router.add_get("/", index)
     app.router.add_get("/privacy", privacy)
+    app.router.add_static("/assets", ASSETS_DIR)  # шрифты и логотип для Mini App
     app.router.add_get("/api/rides", api_rides)
     app.router.add_get("/api/rides/{ride_id:\\d+}", api_ride)
     app.router.add_post("/api/rides/{ride_id:\\d+}/finish", api_finish)
+    app.router.add_post("/api/rides/{ride_id:\\d+}/kind", api_ride_kind)
     app.router.add_post("/api/weight", api_set_weight)
+    app.router.add_post("/api/kind", api_set_kind)
     return app
 
 

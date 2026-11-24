@@ -3,7 +3,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from settings import DEFAULT_WEIGHT, MAX_ACCURACY_M, STALE_AFTER_S
+from settings import DEFAULT_ACTIVITY, DEFAULT_WEIGHT, MAX_ACCURACY_M, STALE_AFTER_S
 from stats import compute_stats
 
 SCHEMA = """
@@ -32,11 +32,17 @@ CREATE TABLE IF NOT EXISTS points (
 CREATE INDEX IF NOT EXISTS points_by_ride ON points(ride_id, ts);
 """
 
-STAT_KEYS = ("distance_km", "duration_s", "moving_s", "avg_speed_kmh", "max_speed_kmh", "kcal")
+STAT_KEYS = (
+    "distance_km", "duration_s", "moving_s", "avg_speed_kmh", "max_speed_kmh", "kcal",
+    "best_1k_s", "best_5k_s",
+)
 # Колонки, появившиеся после первой версии: в старую базу они добавляются при запуске.
 NEW_COLUMNS = {
-    "users": ("consent_at REAL", "consent_version INTEGER NOT NULL DEFAULT 0"),
-    "rides": tuple(f"{k} NUMERIC" for k in STAT_KEYS),  # заполняются при завершении поездки
+    "users": ("consent_at REAL", "consent_version INTEGER NOT NULL DEFAULT 0", "kind TEXT"),
+    "rides": (
+        *(f"{k} NUMERIC" for k in STAT_KEYS),  # заполняются при завершении тренировки
+        f"kind TEXT NOT NULL DEFAULT '{DEFAULT_ACTIVITY}'",
+    ),
 }
 
 
@@ -48,16 +54,19 @@ class Storage:
         self.conn.execute("PRAGMA secure_delete = ON")
         self.conn.executescript(SCHEMA)
         with self.conn:
+            added = set()
             for table, columns in NEW_COLUMNS.items():
                 have = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
                 for column in columns:
                     if column.split()[0] not in have:
                         self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
-            # Поездки, закрытые до появления колонок статистики.
-            for (ride_id,) in self.conn.execute(
-                "SELECT id FROM rides WHERE ended_at IS NOT NULL AND distance_km IS NULL"
-            ).fetchall():
-                self._save_stats(ride_id)
+                        added.add(column.split()[0])
+            # Появилась новая статистика — пересчитать закрытые тренировки.
+            if added & set(STAT_KEYS):
+                for (ride_id,) in self.conn.execute(
+                    "SELECT id FROM rides WHERE ended_at IS NOT NULL"
+                ).fetchall():
+                    self._save_stats(ride_id)
 
     # --- пользователи ---
     def get_weight(self, user_id):
@@ -66,13 +75,25 @@ class Storage:
         ).fetchone()
         return row["weight_kg"] if row else DEFAULT_WEIGHT
 
-    def set_weight(self, user_id, weight_kg):
+    def _set_user(self, user_id, column, value):
+        """column — только из кода, не от пользователя."""
         with self.conn:
             self.conn.execute(
-                "INSERT INTO users(user_id, weight_kg) VALUES (?, ?) "
-                "ON CONFLICT(user_id) DO UPDATE SET weight_kg = excluded.weight_kg",
-                (user_id, weight_kg),
+                f"INSERT INTO users(user_id, {column}) VALUES (?, ?) "
+                f"ON CONFLICT(user_id) DO UPDATE SET {column} = excluded.{column}",
+                (user_id, value),
             )
+
+    def set_weight(self, user_id, weight_kg):
+        self._set_user(user_id, "weight_kg", weight_kg)
+
+    def get_kind(self, user_id):
+        """Тип по умолчанию — последний выбранный."""
+        row = self.conn.execute("SELECT kind FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return (row and row["kind"]) or DEFAULT_ACTIVITY
+
+    def set_kind(self, user_id, kind):
+        self._set_user(user_id, "kind", kind)
 
     def consent_version(self, user_id):
         """Версия условий, которую принял пользователь; 0 — не принимал."""
@@ -118,17 +139,17 @@ class Storage:
         }
 
     # --- поездки ---
-    def start_ride(self, user_id, chat_id, message_id, ts, live_until=None):
-        """Начинает поездку; незавершённые поездки пользователя закрываются."""
+    def start_ride(self, user_id, chat_id, message_id, ts, live_until=None, kind=DEFAULT_ACTIVITY):
+        """Начинает тренировку; незавершённые тренировки пользователя закрываются."""
         for (old_id,) in self.conn.execute(
             "SELECT id FROM rides WHERE user_id = ? AND ended_at IS NULL", (user_id,)
         ).fetchall():
             self.finish_ride(old_id, ts)
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO rides(user_id, chat_id, message_id, started_at, live_until) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (user_id, chat_id, message_id, ts, live_until),
+                "INSERT INTO rides(user_id, chat_id, message_id, started_at, live_until, kind) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, chat_id, message_id, ts, live_until, kind),
             )
             return cur.lastrowid
 
@@ -157,10 +178,17 @@ class Storage:
                 self._save_stats(ride_id)
         return cur.rowcount == 1
 
+    def set_ride_kind(self, ride_id, kind):
+        """Меняет тип тренировки; у завершённой пересчитывает статистику (фильтры и MET зависят от типа)."""
+        with self.conn:
+            self.conn.execute("UPDATE rides SET kind = ? WHERE id = ?", (kind, ride_id))
+            if self.get_ride(ride_id)["ended_at"] is not None:
+                self._save_stats(ride_id)
+
     def _save_stats(self, ride_id):
         """Без commit: вызывается внутри транзакции."""
         ride = self.get_ride(ride_id)
-        stats = compute_stats(self.get_points(ride_id), self.get_weight(ride["user_id"]))
+        stats = compute_stats(self.get_points(ride_id), self.get_weight(ride["user_id"]), ride["kind"])
         self.conn.execute(
             f"UPDATE rides SET {', '.join(f'{k} = ?' for k in STAT_KEYS)} WHERE id = ?",
             (*(stats[k] for k in STAT_KEYS), ride_id),

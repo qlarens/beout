@@ -8,7 +8,7 @@
 ![Telegram Mini App](https://img.shields.io/badge/Telegram-Mini%20App-26A5E4?logo=telegram&logoColor=white)
 ![Status](https://img.shields.io/badge/status-prototype-orange)
 
-Велотрекер в Telegram: бот записывает поездку через «Трансляцию геопозиции», Mini App показывает маршрут, время, скорость и калории.
+Трекер тренировок в Telegram — велосипед, бег, ходьба: бот записывает тренировку через «Трансляцию геопозиции», Mini App показывает маршрут, время, скорость или темп, сплиты и калории.
 
 ## Запуск
 

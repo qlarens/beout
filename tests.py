@@ -38,6 +38,20 @@ def line(n, t0=0.0):
     return [(t0 + i * 10, 52.0 + i * 0.0005, 21.0) for i in range(n)]
 
 
+M_PER_DEG = 6_371_000 * 3.141592653589793 / 180  # метров в градусе широты (как в haversine)
+
+
+def track(*legs, dt=6):
+    """Прямо на север участками (км, км/ч), точка каждые dt секунд."""
+    points, t, lat = [(0.0, 52.0, 21.0)], 0.0, 52.0
+    for km, kmh in legs:
+        step = kmh / 3.6 * dt
+        for _ in range(round(km * 1000 / step)):
+            t, lat = t + dt, lat + step / M_PER_DEG
+            points.append((t, lat, 21.0))
+    return points
+
+
 class AuthTest(unittest.TestCase):
     def test_valid(self):
         self.assertEqual(validate_init_data(init_data(5), TOKEN)["id"], 5)
@@ -97,6 +111,29 @@ class StatsTest(unittest.TestCase):
         self.assertAlmostEqual(compute_stats(fast, 75, "ride")["distance_km"], 1.0, places=1)
         self.assertEqual(compute_stats(fast, 75, "run")["distance_km"], 0)  # для бега это скачки GPS
 
+    def test_same_track_as_ride_and_run(self):
+        points = track((3, 10))  # 3 км по 10 км/ч
+        ride, run = compute_stats(points, 70, "ride"), compute_stats(points, 70, "run")
+        self.assertEqual((ride["distance_km"], ride["avg_speed_kmh"]), (3.0, 10.0))
+        self.assertEqual(bot.fmt_pace(run["avg_speed_kmh"]), "6:00 /км")
+        self.assertEqual(run["splits"], [360, 360, 360])
+        self.assertEqual(run["kcal"], round(9.8 * 70 * 0.3))  # MET бега 9.8 на 10 км/ч, 18 минут
+        self.assertEqual(ride["kcal"], round(4.0 * 70 * 0.3))  # MET вело 4.0
+
+    def test_splits_and_best_efforts(self):
+        stats = compute_stats(track((1, 10), (1, 12), (3.5, 10)), 70, "run")
+        self.assertEqual(stats["splits"][:2], [360, 300])
+        self.assertEqual(stats["best_1k_s"], 300)
+        self.assertEqual(stats["best_5k_s"], 300 + 4 * 360)
+        self.assertIsNone(compute_stats(track((0.9, 10)), 70, "run")["best_1k_s"])
+
+    def test_max_speed_is_smoothed(self):
+        points = track((1, 20), dt=10)
+        t, lat, lon = points[10]
+        points[10] = (t, lat + 70 / M_PER_DEG, lon)  # один отрезок ~45 км/ч, следующий ~0
+        self.assertLess(compute_stats(points, 70, "ride")["max_speed_kmh"], 26)
+        self.assertEqual(bot.fmt_pace(0), "–")
+
 
 class StorageTest(unittest.TestCase):
     def setUp(self):
@@ -114,6 +151,17 @@ class StorageTest(unittest.TestCase):
         self.assertTrue(self.db.finish_ride(ride_id))
         self.assertFalse(self.db.finish_ride(ride_id))  # второй итог не придёт
         self.assertGreater(self.db.get_ride(ride_id)["distance_km"], 0.4)
+
+    def test_change_kind_recomputes_stats(self):
+        self.assertEqual(self.db.get_kind(1), "ride")
+        ride_id = self.ride(points=[(i * 10, 52.0 + i * 0.001, 21.0) for i in range(10)])  # ~40 км/ч
+        self.db.finish_ride(ride_id)
+        self.assertAlmostEqual(self.db.get_ride(ride_id)["distance_km"], 1.0, places=1)
+        self.db.set_ride_kind(ride_id, "run")
+        self.assertEqual(self.db.get_ride(ride_id)["distance_km"], 0)  # для бега такая скорость — скачки
+        self.db.set_kind(1, "walk")
+        self.assertEqual(self.db.get_kind(1), "walk")
+        self.assertEqual(self.db.get_weight(1), 75)  # остальные поля пользователя не тронуты
 
     def test_inaccurate_points_dropped(self):
         ride_id = self.db.start_ride(1, 1, 100, 0)
@@ -167,6 +215,7 @@ class StorageTest(unittest.TestCase):
             old.close()
             db = Storage(path)
             self.assertAlmostEqual(db.get_ride(1)["distance_km"], 0.5, places=1)
+            self.assertEqual(db.get_ride(1)["kind"], "ride")  # раньше были только велопоездки
             self.assertEqual(db.consent_version(1), 0)  # старые пользователи принимают условия заново
             db.conn.close()
 
@@ -232,6 +281,18 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call("POST", "/api/weight", 1, json={"weight": 500})).status, 400)
         self.assertEqual((await self.call("POST", "/api/weight", 1, json={"weight": 70})).status, 200)
         self.assertEqual(bot.db.get_weight(1), 70)
+
+    async def test_change_kind(self):
+        self.consent(1, 2)
+        ride_id = bot.db.start_ride(1, 1, 1, time.time())
+        path = f"/api/rides/{ride_id}/kind"
+        self.assertEqual((await self.call("POST", path, 2, json={"kind": "run"})).status, 404)
+        self.assertEqual((await self.call("POST", path, 1, json={"kind": "swim"})).status, 400)
+        response = await self.call("POST", path, 1, json={"kind": "run"})
+        self.assertEqual((await response.json())["ride"]["kind"], "run")
+        self.assertEqual(bot.db.get_kind(1), "run")  # стал типом по умолчанию
+        await self.call("POST", "/api/kind", 1, json={"kind": "walk"})
+        self.assertEqual((await (await self.call("GET", "/api/rides", 1)).json())["kind"], "walk")
 
     async def test_pagination(self):
         self.consent(1)
@@ -316,6 +377,15 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         stranger.from_user = SimpleNamespace(id=2)
         await bot.on_finish(stranger)
         self.assertIsNone(bot.db.get_ride(ride["id"])["ended_at"])  # чужую не завершить
+
+        stranger.data = f"kind:{ride['id']}:run"
+        await bot.on_kind(stranger)
+        await bot.on_kind(self.callback(f"kind:{ride['id']}:walk"))
+        self.assertEqual(bot.db.get_ride(ride["id"])["kind"], "walk")
+        self.assertEqual(bot.db.get_kind(1), "walk")
+        await bot.on_location(self.location())  # следующая тренировка — сразу ходьба
+        self.assertEqual(bot.db.active_ride(1)["kind"], "walk")
+        ride = bot.db.active_ride(1)
 
         await bot.on_finish(self.callback(f"finish:{ride['id']}"))
         await bot.on_finish(self.callback(f"finish:{ride['id']}"))
