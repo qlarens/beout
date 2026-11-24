@@ -35,20 +35,26 @@ def project(lat, lon, z):
 
 
 def map_view(track):
-    """Наибольший целый зум, на котором маршрут помещается в карту; левый верхний угол окна
-    в пикселях мира и плитки (z, x, y), которые окно покрывает."""
-    for z in range(MAP_MAX_ZOOM, -1, -1):
-        xs, ys = zip(*(project(lat, lon, z) for lat, lon in track))
-        if max(xs) - min(xs) <= MAP_W - 2 * MAP_MARGIN and max(ys) - min(ys) <= MAP_H - 2 * MAP_MARGIN:
-            break
-    left, top = (min(xs) + max(xs) - MAP_W) / 2, (min(ys) + max(ys) - MAP_H) / 2
-    n = 2 ** z
+    """Окно карты, в котором маршрут заполняет карту целиком (до MAP_MARGIN от края).
+
+    Нужный зум дробный, а плитки есть только на целых: берём плитки зума z на ступень крупнее
+    и уменьшаем мозаику в scale раз (0.5 < scale ≤ 1) — карта остаётся чёткой.
+    Возвращает z, scale, левый верхний угол окна в пикселях мира на зуме z и плитки (z, x, y) под окном.
+    """
+    xs, ys = zip(*(project(lat, lon, 0) for lat, lon in track))
+    dx, dy = max(xs) - min(xs), max(ys) - min(ys)
+    fit = min((MAP_W - 2 * MAP_MARGIN) / dx if dx else math.inf, (MAP_H - 2 * MAP_MARGIN) / dy if dy else math.inf)
+    zoom = max(0.0, min(math.log2(fit), MAP_MAX_ZOOM))  # одна точка: fit = inf → MAP_MAX_ZOOM
+    z = math.ceil(zoom)
+    scale, n = 2 ** (zoom - z), 2 ** z
+    w, h = MAP_W / scale, MAP_H / scale
+    left, top = (min(xs) + max(xs)) / 2 * n - w / 2, (min(ys) + max(ys)) / 2 * n - h / 2
     tiles = [
         (z, x, y)
-        for x in range(max(0, int(left // TILE)), min(n, int((left + MAP_W) // TILE) + 1))
-        for y in range(max(0, int(top // TILE)), min(n, int((top + MAP_H) // TILE) + 1))
+        for x in range(max(0, int(left // TILE)), min(n, int((left + w) // TILE) + 1))
+        for y in range(max(0, int(top // TILE)), min(n, int((top + h) // TILE) + 1))
     ]
-    return z, left, top, tiles
+    return z, scale, left, top, tiles
 
 
 def rounded(size, radius):
@@ -60,8 +66,8 @@ def rounded(size, radius):
 
 def draw_map(img, top, track, tiles):
     """Тёмная карта со скруглёнными углами (без плиток — просто фон) и маршрут поверх. track не пуст."""
-    z, left, wtop, keys = map_view(track)
-    panel, drawn = Image.new("L", (MAP_W, MAP_H), 0), False
+    z, scale, left, wtop, keys = map_view(track)
+    panel, drawn = Image.new("L", (math.ceil(MAP_W / scale), math.ceil(MAP_H / scale)), 0), False
     for key in keys:
         try:
             tile = Image.open(io.BytesIO(tiles[key])).convert("L")
@@ -73,7 +79,8 @@ def draw_map(img, top, track, tiles):
     img.paste(panel, (PAD * S, top * S), rounded(panel.size, 32))
 
     d = ImageDraw.Draw(img)
-    xy = [((x - left + PAD) * S, (y - wtop + top) * S) for x, y in (project(lat, lon, z) for lat, lon in track)]
+    xy = [(((x - left) * scale + PAD) * S, ((y - wtop) * scale + top) * S)
+          for x, y in (project(lat, lon, z) for lat, lon in track)]
     if len(xy) > 1:
         d.line(xy, fill=BG, width=18 * S, joint="curve")  # окантовка: линия читается и на дорогах
         d.line(xy, fill=LIME, width=10 * S, joint="curve")

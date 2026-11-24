@@ -264,7 +264,7 @@ async def fetch_tiles(keys):
 
 
 async def card_tiles(track):
-    return await fetch_tiles(map_view(track)[3]) if track else None
+    return await fetch_tiles(map_view(track)[-1]) if track else None
 
 
 async def finish_and_report(bot, ride_id, ts=None, manual=False):

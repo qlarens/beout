@@ -29,7 +29,7 @@ bot.fetch_elevations = AsyncMock(return_value=None)
 REAL_FETCH_TILES = bot.fetch_tiles  # и в OSM тоже: см. MapTest
 bot.fetch_tiles = AsyncMock(return_value=None)
 from auth import validate_init_data  # noqa: E402
-from cards import MAP_H, MAP_W, TILE, map_view, project, render_card, render_story  # noqa: E402
+from cards import MAP_H, MAP_MARGIN, MAP_W, TILE, map_view, project, render_card, render_story  # noqa: E402
 from aiohttp import web  # noqa: E402
 from stats import compute_stats, elevation_gain, streaks  # noqa: E402
 from settings import MAP_MAX_ZOOM, SESSION_TTL_S  # noqa: E402
@@ -425,7 +425,7 @@ class CardTest(unittest.TestCase):
     def test_cards_are_png(self):
         for points in ([], line(1), track((1.2, 10))):
             stats = compute_stats(points, 70, "run")
-            keys = map_view(stats["track"])[3] if stats["track"] else []
+            keys = map_view(stats["track"])[-1] if stats["track"] else []
             tiles = {key: tile_png() for key in keys} | dict.fromkeys(keys[:1], b"broken")  # битая — пропуск
             for tiles in (None, tiles):
                 png = render_card("run", stats, ["Новый рекорд: самая длинная"], tiles)
@@ -434,18 +434,34 @@ class CardTest(unittest.TestCase):
                 self.assertEqual(Image.open(io.BytesIO(png)).size, (1080, 1920))
 
     def test_map_view(self):
-        route = [(52.0, 21.0), (52.01, 21.0), (52.01, 21.05)]
-        z, left, top, tiles = map_view(route)
-        xs, ys = zip(*(project(lat, lon, z) for lat, lon in route))
-        self.assertTrue(all(left < x < left + MAP_W for x in xs) and all(top < y < top + MAP_H for y in ys))
-        self.assertGreater(ys[0], ys[1])  # север — вверху
-        z_out = map_view([(52.0, 20.9), (52.0, 21.15)])[0]
-        self.assertLess(z_out, z)  # шире маршрут — мельче карта
-        self.assertEqual({(tz, tx, ty) for tz, tx, ty in tiles if tz == z}, set(tiles))
+        def on_card(route):
+            """Маршрут в пикселях карты на карточке (0..MAP_W, 0..MAP_H)."""
+            z, scale, left, top, tiles = map_view(route)
+            return [((x - left) * scale, (y - top) * scale) for x, y in (project(lat, lon, z) for lat, lon in route)]
+
+        for route in (
+            [(52.0, 21.0), (52.01, 21.0), (52.01, 21.05)],  # ~3.5 км, шире, чем выше
+            [(52.0, 21.0), (52.003, 21.0), (52.003, 21.002)],  # ~330 м на север: упирается в высоту
+            [(52.0, 20.9), (52.0, 21.15)],  # ~17 км
+        ):
+            xs, ys = zip(*on_card(route))
+            # Маршрут заполняет карту по одной из сторон и не вылезает за отступ.
+            self.assertTrue(all(MAP_MARGIN - 1 <= x <= MAP_W - MAP_MARGIN + 1 for x in xs))
+            self.assertTrue(all(MAP_MARGIN - 1 <= y <= MAP_H - MAP_MARGIN + 1 for y in ys))
+            self.assertTrue(abs(max(xs) - min(xs) - (MAP_W - 2 * MAP_MARGIN)) < 1
+                            or abs(max(ys) - min(ys) - (MAP_H - 2 * MAP_MARGIN)) < 1)
+            if route[1][0] > route[0][0]:
+                self.assertGreater(ys[0], ys[1])  # север — вверху
+
+        z, scale, left, top, tiles = map_view([(52.0, 21.0), (52.01, 21.0), (52.01, 21.05)])
+        self.assertTrue(0.5 < scale <= 1)  # плитки крупнее нужного зума: уменьшаем, а не растягиваем
+        self.assertTrue(all(tz == z for tz, _, _ in tiles))
         covered = {(x, y) for _, x, y in tiles}  # плитки покрывают углы окна
-        for cx, cy in ((left, top), (left + MAP_W - 1, top + MAP_H - 1)):
+        for cx, cy in ((left, top), (left + MAP_W / scale - 1, top + MAP_H / scale - 1)):
             self.assertIn((int(cx // TILE), int(cy // TILE)), covered)
-        self.assertEqual(map_view([(52.0, 21.0)])[0], MAP_MAX_ZOOM)  # одна точка — крупнейший зум
+        self.assertEqual(map_view([(52.0, 21.0)])[:2], (MAP_MAX_ZOOM, 1))  # одна точка — крупнейший зум
+        tiny = on_card([(52.0, 21.0), (52.0001, 21.0)])  # 11 м: шум GPS на всю карту не растягиваем
+        self.assertLess(abs(tiny[0][1] - tiny[1][1]), 50)
 
 
 class MapTest(unittest.IsolatedAsyncioTestCase):

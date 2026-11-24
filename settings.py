@@ -61,7 +61,7 @@ ELEVATION_MIN_STEP_M = 3     # подъём засчитывается, толь
 # Плитки OSM: по их правилам — свой User-Agent с контактом, кэш, атрибуция на картинке.
 MAP_TILES = "https://tile.openstreetmap.org/{}/{}/{}.png"  # z, x, y
 MAP_USER_AGENT = "beout-bot/1.0 (+https://github.com/qlarens/beout)"
-MAP_MAX_ZOOM = 16       # короткую прогулку не увеличиваем до отдельных домов
+MAP_MAX_ZOOM = 18       # маршрут короче ~300 м не растягиваем на всю карту: шум GPS (у OSM до 19)
 MAP_TIMEOUT_S = 10      # не дождались — карточка без карты
 MAP_CACHE_TILES = 500   # ≈ 10 МБ в памяти
 
