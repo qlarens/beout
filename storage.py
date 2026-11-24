@@ -46,6 +46,11 @@ CREATE TABLE IF NOT EXISTS groups (
     chat_id     INTEGER PRIMARY KEY,
     posted_week TEXT  -- неделя последнего автопоста рейтинга, «2026-W48»
 );
+CREATE TABLE IF NOT EXISTS sos_contacts (  -- contact_id сам согласился по ссылке-приглашению
+    user_id    INTEGER NOT NULL,
+    contact_id INTEGER NOT NULL,
+    PRIMARY KEY (user_id, contact_id)
+);
 CREATE TABLE IF NOT EXISTS group_members (  -- согласились участвовать в рейтинге группы
     chat_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
@@ -65,11 +70,15 @@ RECORDS = {
 }
 # Колонки, появившиеся после первой версии: в старую базу они добавляются при запуске.
 NEW_COLUMNS = {
-    "users": ("consent_at REAL", "consent_version INTEGER NOT NULL DEFAULT 0", "kind TEXT"),
+    "users": (
+        "consent_at REAL", "consent_version INTEGER NOT NULL DEFAULT 0", "kind TEXT",
+        "sos_token TEXT",  # из ссылки-приглашения экстренного контакта
+    ),
     "rides": (
         *(f"{k} NUMERIC" for k in STAT_KEYS),  # заполняются при завершении тренировки
         f"kind TEXT NOT NULL DEFAULT '{DEFAULT_ACTIVITY}'",
         "session_id INTEGER",  # совместная тренировка
+        "elevation_gain_m INTEGER",  # от Open-Meteo после финиша; NULL — сервис был недоступен
     ),
 }
 
@@ -155,6 +164,9 @@ class Storage:
             )
             self.conn.execute("DELETE FROM sessions WHERE owner_id = ?", (user_id,))
             self.conn.execute("DELETE FROM group_members WHERE user_id = ?", (user_id,))
+            self.conn.execute(
+                "DELETE FROM sos_contacts WHERE user_id = ? OR contact_id = ?", (user_id, user_id)
+            )
 
     def export_user(self, user_id):
         """Все данные пользователя одним словарём — для выгрузки по /export."""
@@ -178,7 +190,46 @@ class Storage:
             "rating_groups": [r[0] for r in self.conn.execute(
                 "SELECT chat_id FROM group_members WHERE user_id = ?", (user_id,)
             )],
+            "sos_contacts": self.sos_contacts(user_id),
+            "sos_contact_for": [r[0] for r in self.conn.execute(
+                "SELECT user_id FROM sos_contacts WHERE contact_id = ?", (user_id,)
+            )],
         }
+
+    # --- SOS ---
+    def sos_token(self, user_id):
+        """Секрет для ссылки-приглашения экстренного контакта; создаётся при первом запросе."""
+        row = self.conn.execute("SELECT sos_token FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        if row and row["sos_token"]:
+            return row["sos_token"]
+        token = secrets.token_urlsafe(12)
+        self._set_user(user_id, "sos_token", token)
+        return token
+
+    def rotate_sos_token(self, user_id):
+        """Старая ссылка-приглашение перестаёт работать; новая создастся при следующем запросе."""
+        self._set_user(user_id, "sos_token", None)
+
+    def user_by_sos_token(self, token):
+        row = self.conn.execute("SELECT user_id FROM users WHERE sos_token = ?", (token,)).fetchone()
+        return row and row["user_id"]
+
+    def set_sos_contact(self, user_id, contact_id, on):
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO sos_contacts(user_id, contact_id) VALUES (?, ?)" if on
+                else "DELETE FROM sos_contacts WHERE user_id = ? AND contact_id = ?",
+                (user_id, contact_id),
+            )
+
+    def sos_contacts(self, user_id):
+        return [r[0] for r in self.conn.execute(
+            "SELECT contact_id FROM sos_contacts WHERE user_id = ?", (user_id,)
+        )]
+
+    def set_elevation(self, ride_id, gain_m):
+        with self.conn:
+            self.conn.execute("UPDATE rides SET elevation_gain_m = ? WHERE id = ?", (gain_m, ride_id))
 
     # --- поездки ---
     def start_ride(self, user_id, chat_id, message_id, ts, live_until=None, kind=DEFAULT_ACTIVITY):

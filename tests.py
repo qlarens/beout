@@ -20,9 +20,14 @@ os.environ.pop("DEV_USER_ID", None)
 from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 
 import bot  # noqa: E402
+
+# Тесты не ходят в Open-Meteo; настоящий запрос проверяет ElevationTest на локальном сервере.
+REAL_FETCH_ELEVATIONS = bot.fetch_elevations
+bot.fetch_elevations = AsyncMock(return_value=None)
 from auth import validate_init_data  # noqa: E402
 from cards import fit_route, render_card  # noqa: E402
-from stats import compute_stats, streaks  # noqa: E402
+from aiohttp import web  # noqa: E402
+from stats import compute_stats, elevation_gain, streaks  # noqa: E402
 from settings import SESSION_TTL_S  # noqa: E402
 from storage import SCHEMA, STALE_AFTER_S, Storage  # noqa: E402
 
@@ -200,7 +205,10 @@ class StorageTest(unittest.TestCase):
         self.assertIsNone(self.db.get_ride(mine))
         self.assertEqual(self.db.get_points(mine), [])
         self.assertEqual(self.db.consent_version(1), 0)
-        self.assertEqual(self.db.export_user(1), {"user": {"user_id": 1}, "rides": [], "sessions": [], "rating_groups": []})
+        self.assertEqual(self.db.export_user(1), {
+            "user": {"user_id": 1}, "rides": [], "sessions": [], "rating_groups": [],
+            "sos_contacts": [], "sos_contact_for": [],
+        })
         self.assertEqual(len(self.db.get_points(other)), 10)
 
     def test_delete_user_leaves_sessions_and_ratings(self):
@@ -212,6 +220,21 @@ class StorageTest(unittest.TestCase):
         self.db.delete_user(1)
         self.assertIsNone(self.db.current_session(2))  # сессию владельца не видно и участникам
         self.assertEqual(self.db.groups_to_post("2026-W01"), [])
+
+    def test_sos_contacts(self):
+        token = self.db.sos_token(1)
+        self.assertEqual(self.db.sos_token(1), token)  # ссылка постоянна, пока ею не воспользовались
+        self.assertEqual(self.db.user_by_sos_token(token), 1)
+        self.db.set_sos_contact(1, 2, True)
+        self.db.set_sos_contact(1, 3, True)
+        self.db.rotate_sos_token(1)
+        self.assertIsNone(self.db.user_by_sos_token(token))
+        self.assertNotEqual(self.db.sos_token(1), token)
+        self.db.set_sos_contact(1, 3, False)
+        self.assertEqual(self.db.sos_contacts(1), [2])
+        self.assertEqual(self.db.export_user(2)["sos_contact_for"], [1])
+        self.db.delete_user(2)  # контакт удалил свои данные
+        self.assertEqual(self.db.sos_contacts(1), [])
 
     def test_session_links_rides(self):
         now = 1_000_000.0
@@ -323,6 +346,7 @@ def fake_bot():
     """Поддельный Bot: запоминает вызовы, отвечает как Telegram."""
     return SimpleNamespace(
         send_message=AsyncMock(),
+        send_location=AsyncMock(),
         send_photo=AsyncMock(return_value=SimpleNamespace(photo=[SimpleNamespace(file_id="small"), SimpleNamespace(file_id="big")])),
         save_prepared_inline_message=AsyncMock(return_value=SimpleNamespace(id="prep1")),
         me=AsyncMock(return_value=SimpleNamespace(username="beout_bot")),
@@ -338,6 +362,41 @@ def finished_ride(db, user_id, kind, t0, km, kmh=10):
         db.add_point(ride_id, t0 + ts, lat, lon)
     db.finish_ride(ride_id, t0 + km * 3600 / kmh)
     return ride_id
+
+
+class ElevationTest(unittest.IsolatedAsyncioTestCase):
+    def test_gain(self):
+        noise = [100 + (-1) ** i * 2 for i in range(50)]  # ±2 м шума модели рельефа
+        self.assertEqual(elevation_gain(noise, 3, 3), 0)
+        climb = [100 + i + (-1) ** i * 2 for i in range(51)]  # +50 м с шумом
+        self.assertAlmostEqual(elevation_gain(climb, 3, 3), 50, delta=3)
+        hills = [*range(100, 121), *range(120, 99, -1), *range(100, 121)]  # +20, −20, +20
+        self.assertAlmostEqual(elevation_gain(hills, 3, 3), 40, delta=3)  # сглаживание срезает вершины
+        self.assertEqual(elevation_gain([], 3, 3), 0)
+
+    async def test_fetch_in_batches(self):
+        requests = []
+
+        async def elevation(request):  # как Open-Meteo: высота на каждую пару координат
+            lats = request.query["latitude"].split(",")
+            requests.append(len(lats))
+            if request.query.get("longitude") == "fail":
+                return web.Response(status=500)
+            return web.json_response({"elevation": [float(lat) for lat in lats]})
+
+        app = web.Application()
+        app.router.add_get("/v1/elevation", elevation)
+        server = TestServer(app)
+        await server.start_server()
+        self.addAsyncCleanup(server.close)
+        url = str(server.make_url("/v1/elevation"))
+        track = [(52.0 + i * 0.001, 21.0) for i in range(1200)]
+        with patch.object(bot, "ELEVATION_API", url):
+            elevations = await REAL_FETCH_ELEVATIONS(track)
+        self.assertEqual(requests, [100] * 4)  # 1200 точек прорежены до 400 (каждая 3-я), по 100 в запросе
+        self.assertEqual(elevations[:2], [52.0, 52.003])
+        with patch.object(bot, "ELEVATION_API", "http://127.0.0.1:1/nothing"):
+            self.assertIsNone(await REAL_FETCH_ELEVATIONS(track))  # сервис недоступен — без высоты
 
 
 class CardTest(unittest.TestCase):
@@ -484,6 +543,40 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("user_id", people["User2"])  # чужие id не отдаём
         self.assertEqual((await (await self.call("GET", "/api/rides", 2)).json())["session_id"], created["id"])
 
+    async def test_sos(self):
+        self.consent(1)
+        invite = (await (await self.call("GET", "/api/sos", 1)).json())["invite"]
+        self.assertTrue(invite.startswith("https://t.me/beout_bot?start=sos_"))
+        self.assertEqual((await self.call("POST", "/api/sos/send", 1)).status, 409)  # нет тренировки
+
+        ride_id = bot.db.start_ride(1, 1, 1, time.time() - 120)
+        bot.db.add_point(ride_id, time.time() - 120, 52.1, 21.2)
+        self.assertEqual((await self.call("POST", "/api/sos/send", 1)).status, 400)  # нет контактов
+
+        bot.db.set_sos_contact(1, 2, True)
+        bot.db.set_sos_contact(1, 3, True)
+        self.tg.send_message.side_effect = lambda chat_id, text: (
+            (_ for _ in ()).throw(bot.TelegramForbiddenError(method=None, message="blocked")) if chat_id == 3 else None)
+        result = await (await self.call("POST", "/api/sos/send", 1)).json()
+        self.assertEqual(result, {"sent": 1, "total": 2})  # заблокировавший бота не мешает остальным
+        self.tg.send_location.assert_awaited_once_with(2, 52.1, 21.2)
+        self.assertIn("2 мин назад", self.tg.send_message.call_args_list[0].args[1])
+
+        contacts = (await (await self.call("GET", "/api/sos", 1)).json())["contacts"]
+        self.assertEqual(contacts, [{"id": 2, "name": "User2"}, {"id": 3, "name": "User3"}])
+        await self.call("DELETE", "/api/sos/3", 1)
+        self.assertEqual(bot.db.sos_contacts(1), [2])
+
+    async def test_finish_with_elevation(self):
+        self.consent(1)
+        ride_id = bot.db.start_ride(1, 1, 1, 0)
+        for ts, lat, lon in line(5):
+            bot.db.add_point(ride_id, ts, lat, lon)
+        with patch.object(bot, "fetch_elevations", AsyncMock(return_value=[100, 110, 120, 130, 120])):
+            ride = (await (await self.call("POST", f"/api/rides/{ride_id}/finish", 1)).json())["ride"]
+        self.assertEqual(ride["elevation_gain_m"], 23)  # сглаживание по 3 точкам: вершина 123.3
+        self.assertIn("Набор высоты: 23 м", self.tg.send_message.call_args.args[1])
+
     async def test_change_kind(self):
         self.consent(1, 2)
         ride_id = bot.db.start_ride(1, 1, 1, time.time())
@@ -556,6 +649,39 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         await bot.on_delete(self.callback("delete:yes"))
         self.assertIsNone(bot.db.get_ride(ride["id"]))
         self.assertFalse(bot.has_consent(1))
+
+    async def test_sos_invitation(self):
+        token = bot.db.sos_token(1)
+
+        def start(user_id, args):
+            msg = SimpleNamespace(from_user=SimpleNamespace(id=user_id), bot=self.tg, answer=AsyncMock())
+            return msg, SimpleNamespace(args=args)
+
+        own, command = start(1, f"sos_{token}")
+        await bot.cmd_start(own, command)
+        self.assertIn("твоя ссылка", own.answer.call_args.args[0])
+
+        friend, command = start(2, f"sos_{token}")
+        await bot.cmd_start(friend, command)
+        self.assertIn("User1 просит стать экстренным контактом", friend.answer.call_args.args[0])
+        self.assertEqual(bot.db.sos_contacts(1), [])  # пока не согласился — не контакт
+
+        accept = self.callback(f"sos:on:{token}")
+        accept.from_user = SimpleNamespace(id=2)
+        await bot.on_sos_contact(accept)
+        self.assertEqual(bot.db.sos_contacts(1), [2])
+        self.assertEqual(self.tg.send_message.call_args.args[0], 1)  # владельцу сообщили
+
+        reused = self.callback(f"sos:on:{token}")  # ссылку переслали дальше
+        reused.from_user = SimpleNamespace(id=3)
+        await bot.on_sos_contact(reused)
+        self.assertEqual(bot.db.sos_contacts(1), [2])
+        self.assertTrue(reused.answer.call_args.kwargs["show_alert"])
+
+        leave = self.callback("sos:off:1")
+        leave.from_user = SimpleNamespace(id=2)
+        await bot.on_sos_contact(leave)
+        self.assertEqual(bot.db.sos_contacts(1), [])
 
     async def test_personal_commands_only_in_private_chat(self):
         """/export в группе выложил бы личные данные всем участникам."""

@@ -7,6 +7,8 @@ Telegram присылает обновления, даже когда телеф
 import asyncio
 import json
 import logging
+import math
+from html import escape
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -32,12 +34,23 @@ from aiogram.types import (
     Message,
     WebAppInfo,
 )
-from aiohttp import web
+from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
 from auth import validate_init_data
 from cards import render_card
-from stats import compute_stats, fmt_duration, fmt_pace, streaks
-from settings import ACTIVITIES, APP_NAME, RATING_POST_HOUR_UTC, RATING_TOP_N
+from stats import compute_stats, elevation_gain, fmt_duration, fmt_pace, streaks
+from settings import (
+    ACTIVITIES,
+    APP_NAME,
+    ELEVATION_API,
+    ELEVATION_BATCH,
+    ELEVATION_MAX_POINTS,
+    ELEVATION_MIN_STEP_M,
+    ELEVATION_SMOOTH_POINTS,
+    ELEVATION_TIMEOUT_S,
+    RATING_POST_HOUR_UTC,
+    RATING_TOP_N,
+)
 from storage import STAT_KEYS, Storage
 
 # Секреты — только из окружения, чтобы токен не лежал в коде.
@@ -174,6 +187,7 @@ def ride_summary(ride):
         f"(в движении {fmt_duration(stats['moving_s'])})\n"
         f"⚡ {speed_line(ride, stats)}\n"
         f"🔥 Калории: ≈ <b>{stats['kcal']} ккал</b>"
+        + (f"\n⛰ Набор высоты: {ride['elevation_gain_m']} м" if ride["elevation_gain_m"] is not None else "")
         + "".join(f"\n🏆 {label}" for label in record_labels(ride))
     )
 
@@ -190,11 +204,40 @@ def record_labels(ride):
     return [f"Новый рекорд: {RECORD_TITLES[key]}" for key in db.new_records(ride)]
 
 
+async def fetch_elevations(track):
+    """Высоты точек [(lat, lon)] у Open-Meteo, пачками; None — сервис недоступен.
+
+    Уходят только координаты, без Telegram ID.
+    """
+    sample = track[::math.ceil(len(track) / ELEVATION_MAX_POINTS)]
+    elevations = []
+    try:
+        async with ClientSession(timeout=ClientTimeout(total=ELEVATION_TIMEOUT_S)) as http:
+            for i in range(0, len(sample), ELEVATION_BATCH):
+                chunk = sample[i:i + ELEVATION_BATCH]
+                params = {
+                    "latitude": ",".join(f"{lat:.5f}" for lat, _ in chunk),
+                    "longitude": ",".join(f"{lon:.5f}" for _, lon in chunk),
+                }
+                async with http.get(ELEVATION_API, params=params) as response:
+                    response.raise_for_status()
+                    elevations += (await response.json())["elevation"]
+    except (ClientError, asyncio.TimeoutError, KeyError, TypeError, ValueError) as e:
+        logging.warning("Высота недоступна: %r", e)
+        return None
+    return elevations
+
+
 async def finish_and_report(bot, ride_id, ts=None):
     """Закрывает тренировку и присылает итог — только если её не закрыли раньше."""
     if not db.finish_ride(ride_id, ts):
         return
     ride = db.get_ride(ride_id)
+    track = compute_stats(db.get_points(ride_id), 0, ride["kind"])["track"]
+    elevations = await fetch_elevations(track) if len(track) > 1 else None
+    if elevations:  # сервис недоступен — просто без высоты
+        db.set_elevation(ride_id, elevation_gain(elevations, ELEVATION_MIN_STEP_M, ELEVATION_SMOOTH_POINTS))
+        ride = db.get_ride(ride_id)
     await bot.send_message(
         ride["chat_id"],
         ride_summary(ride),
@@ -253,13 +296,72 @@ async def reply_in_place(callback: CallbackQuery, text, reply_markup=None):
 # ---------- согласие, данные пользователя ----------
 
 @private.message(CommandStart())
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, command: CommandObject):
+    if command.args and command.args.startswith("sos_"):
+        await sos_invitation(message, command.args.removeprefix("sos_"))
+        return
     if not has_consent(message.from_user.id):
         await message.answer(CONSENT_TEXT, reply_markup=consent_keyboard())
         return
     await message.answer(
         welcome_text(message.from_user.id), parse_mode="HTML", reply_markup=open_app_keyboard()
     )
+
+
+# ---------- SOS: экстренные контакты ----------
+# Бот пишет только тем, кто его запускал, поэтому контакт приходит сам — по ссылке t.me/<bot>?start=sos_<token>.
+
+async def sos_invitation(message, token):
+    owner = db.user_by_sos_token(token)
+    if owner == message.from_user.id:
+        await message.answer("Это твоя ссылка — отправь её близкому человеку.")
+        return
+    if not owner:
+        await message.answer("Ссылка недействительна: попроси прислать новую.")
+        return
+    name = await user_name(message.bot, owner)
+    await message.answer(
+        f"{name} просит стать экстренным контактом в {APP_NAME}.\n\n"
+        f"Если во время тренировки {name} нажмёт SOS, я пришлю тебе последнюю геопозицию. "
+        "О тебе сохраняется только Telegram ID.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Да, стать контактом", callback_data=f"sos:on:{token}")],
+            [InlineKeyboardButton(text="Нет", callback_data="sos:no")],
+        ]),
+    )
+
+
+@dp.callback_query(F.data.regexp(r"^sos:(on:[\w-]+|off:\d+|no)$"))
+async def on_sos_contact(callback: CallbackQuery):
+    contact, action = callback.from_user.id, callback.data.split(":")
+    if action[1] == "no":
+        await reply_in_place(callback, "Хорошо, ты не экстренный контакт.")
+        return
+    if action[1] == "off":  # контакт отказывается сам
+        owner = int(action[2])
+        db.set_sos_contact(owner, contact, False)
+        await reply_in_place(callback, f"Ты больше не экстренный контакт для {escape(await user_name(callback.bot, owner))}.")
+        return
+    owner = db.user_by_sos_token(action[2])
+    if not owner or owner == contact:
+        await callback.answer("Ссылка недействительна: попроси прислать новую.", show_alert=True)
+        return
+    db.set_sos_contact(owner, contact, True)
+    db.rotate_sos_token(owner)  # ссылка одноразовая: пересланная дальше уже не сработает
+    await reply_in_place(
+        callback,
+        f"Готово: ты экстренный контакт для {escape(await user_name(callback.bot, owner))}.",
+        InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Отказаться", callback_data=f"sos:off:{owner}"),
+        ]]),
+    )
+    try:
+        await callback.bot.send_message(
+            owner, f"{await user_name(callback.bot, contact)} теперь твой экстренный контакт. "
+                   "Список и удаление — в профиле Mini App."
+        )
+    except TelegramAPIError:
+        logging.warning("Не удалось сообщить %s о новом контакте", owner)
 
 
 @dp.callback_query(F.data == "consent")
@@ -551,6 +653,7 @@ def ride_to_json(ride):
         "started_at": ride["started_at"],
         "ended_at": ride["ended_at"],
         "active": ride["ended_at"] is None,
+        "elevation_gain_m": ride["elevation_gain_m"],
         **stats_of(ride),
     }
 
@@ -676,6 +779,48 @@ async def api_session(request):
     })
 
 
+async def api_sos(request):
+    user_id = current_user_id(request)
+    bot = request.app[BOT_KEY]
+    return web.json_response({
+        "contacts": [{"id": c, "name": await user_name(bot, c)} for c in db.sos_contacts(user_id)],
+        "invite": f"https://t.me/{(await bot.me()).username}?start=sos_{db.sos_token(user_id)}",
+    })
+
+
+async def api_sos_remove(request):
+    db.set_sos_contact(current_user_id(request), int(request.match_info["contact_id"]), False)
+    return web.json_response({"removed": True})
+
+
+async def api_sos_send(request):
+    """Последняя точка идущей тренировки — всем экстренным контактам."""
+    user_id = current_user_id(request)
+    ride = db.active_ride(user_id)
+    points = db.get_points(ride["id"]) if ride else []
+    if not points:
+        raise web.HTTPConflict(text="Нет геопозиции: SOS работает во время тренировки с трансляцией")
+    contacts = db.sos_contacts(user_id)
+    if not contacts:
+        raise web.HTTPBadRequest(text="Сначала добавь экстренный контакт в профиле")
+    ts, lat, lon = points[-1]
+    bot = request.app[BOT_KEY]
+    text = (
+        f"🆘 SOS от {await user_name(bot, user_id)} во время тренировки.\n"
+        f"Последняя геопозиция — ниже, получена {int(max(0, time.time() - ts) // 60)} мин назад.\n"
+        "Свяжись как можно скорее. Если ответа нет — звони 112."
+    )
+    sent = 0
+    for contact in contacts:
+        try:
+            await bot.send_message(contact, text)
+            await bot.send_location(contact, lat, lon)
+            sent += 1
+        except TelegramAPIError:  # контакт заблокировал бота — остальным всё равно отправляем
+            logging.warning("SOS не доставлен контакту %s", contact)
+    return web.json_response({"sent": sent, "total": len(contacts)})
+
+
 async def api_delete_ride(request):
     db.delete_ride(own_ride(request)["id"])
     return web.json_response({"deleted": True})
@@ -767,6 +912,9 @@ def make_web_app(bot):
     app.router.add_post("/api/sessions", api_create_session)
     app.router.add_post("/api/sessions/join/{token:[\\w-]+}", api_join_session)
     app.router.add_get("/api/sessions/{session_id:\\d+}", api_session)
+    app.router.add_get("/api/sos", api_sos)
+    app.router.add_post("/api/sos/send", api_sos_send)
+    app.router.add_delete("/api/sos/{contact_id:\\d+}", api_sos_remove)
     app.router.add_post("/api/rides/{ride_id:\\d+}/finish", api_finish)
     app.router.add_post("/api/rides/{ride_id:\\d+}/kind", api_ride_kind)
     app.router.add_post("/api/rides/{ride_id:\\d+}/share", api_share)

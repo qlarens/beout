@@ -115,8 +115,10 @@
   nav button { flex: 1; flex-direction: column; gap: 2px; background: none; color: var(--hint); font-size: 11px; padding: 4px; }
   nav button[aria-current="page"] { color: var(--ink); }
 
+  button.sos { background: var(--danger); color: #fff; font-weight: 700; min-height: 56px; margin-bottom: 12px; }
+  .rec-row button { min-height: 36px; padding: 6px 12px; font-size: 13px; }
   .record { display: flex; align-items: center; gap: 8px; color: var(--ink); font-weight: 600; margin: -8px 0 12px; }
-  .rec-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--card); }
+  .rec-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--card); }
   .rec-row b { font-family: "Inter Display", "Inter", sans-serif; }
 
   .sheet { position: fixed; inset: 0; background: var(--bg); padding: 24px 16px; overflow: auto; z-index: 1000; }
@@ -160,6 +162,12 @@
   <div class="chips" id="profile-kinds" role="group" aria-label="Тип по умолчанию"></div>
   <h2>Личные рекорды</h2>
   <div id="records"></div>
+  <h2>Экстренные контакты (SOS)</h2>
+  <p class="hint">Контакт сам открывает ссылку и соглашается. Кнопка SOS — на экране идущей тренировки:
+    контакты получат твою последнюю геопозицию. Это не вызов экстренных служб — в опасности звони 112.</p>
+  <div id="sos-contacts"></div>
+  <p></p>
+  <button class="wide" id="sos-invite">Пригласить контакт</button>
   <h2>Мои данные</h2>
   <p class="hint">Выгрузить все данные — /export, удалить всё — /delete в чате с ботом.<br>
     <a href="/privacy" id="privacy-link">Условия и политика конфиденциальности</a></p>
@@ -170,6 +178,7 @@
   <h1 id="ride-title"></h1>
   <div id="ride-records"></div>
   <div id="ride-live"></div>
+  <button class="wide sos hidden" id="sos"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17v.01"/></svg>SOS — экстренным контактам</button>
   <div id="map"></div>
   <div class="grid" id="ride-stats"></div>
   <div id="ride-actions" class="hidden">
@@ -394,9 +403,38 @@ $("more").addEventListener("click", async () => {
 });
 
 // ---------- профиль ----------
+// Экстренные контакты: приглашение одноразовое, после согласия контакта ссылка меняется.
+let sosInvite = null;
+async function loadSos() {
+  const sos = await api("/api/sos");
+  sosInvite = sos.invite;
+  $("sos-contacts").innerHTML = sos.contacts.map((c) => `<div class="rec-row"><span>${esc(c.name)}</span>
+    <button class="danger" data-contact="${c.id}" aria-label="Удалить контакт ${esc(c.name)}">Удалить</button></div>`).join("")
+    || '<p class="hint">Пока нет контактов.</p>';
+}
+$("sos-contacts").addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-contact]");
+  if (!b || !(await confirmDialog("Удалить экстренный контакт?"))) return;
+  try { await api(`/api/sos/${b.dataset.contact}`, { method: "DELETE" }); await loadSos(); } catch (err) { showError(err); }
+});
+$("sos-invite").addEventListener("click", () => {
+  const text = "Стань моим экстренным контактом: если я нажму SOS на тренировке, бот пришлёт тебе мою геопозицию.";
+  const url = `https://t.me/share/url?url=${encodeURIComponent(sosInvite)}&text=${encodeURIComponent(text)}`;
+  tg ? tg.openTelegramLink(url) : window.open(url);
+});
+$("sos").addEventListener("click", async () => {
+  if (!(await confirmDialog("Отправить SOS экстренным контактам? Они получат твою последнюю геопозицию."))) return;
+  try {
+    const r = await post("/api/sos/send");
+    haptic(r.sent ? "success" : "error");
+    const text = `SOS отправлен: ${r.sent} из ${r.total}.`;
+    tg ? tg.showAlert(text) : alert(text);
+  } catch (e) { haptic("error"); showError(e); }
+});
+
 async function showProfile() {
   show("profile");
-  const [, sum] = await Promise.all([loadMe(), summary()]);
+  const [, sum] = await Promise.all([loadMe(), summary(), loadSos()]);
   $("weight").value = me.weight;
   kindChips($("profile-kinds"), me.kind, pickDefaultKind(showProfile));
   $("records").innerHTML = Object.keys(KINDS).filter((k) => sum.records[k]).map((k) =>
@@ -454,6 +492,7 @@ async function renderRide(id, fitView) {
       <div class="pair"><div><div class="num">${ride.distance_km}</div><div class="label">км</div></div>
         <div><div class="num">${fast[0]}</div><div class="label">${fast[1]}</div></div></div></div>` : "";
   $("ride-actions").classList.toggle("hidden", ride.active);
+  $("sos").classList.toggle("hidden", !ride.active);
   $("delete").classList.toggle("hidden", ride.active);
   shareRideId = ride.id;
   $("ride-records").innerHTML = ride.records.map((key) =>
@@ -461,7 +500,8 @@ async function renderRide(id, fitView) {
   if (fitView && ride.records.length) haptic("success");
   $("ride-stats").innerHTML = ride.active ? "" :
     tile(ride.distance_km, "км") + tile(fmtDuration(ride.moving_s), "в движении") + tile(fmtDuration(ride.duration_s), "всего") +
-    tile(fast[0], fast[1]) + tile(fast[2], fast[3]) + tile(`≈ ${ride.kcal}`, "ккал");
+    tile(fast[0], fast[1]) + tile(fast[2], fast[3]) + tile(`≈ ${ride.kcal}`, "ккал") +
+    (ride.elevation_gain_m != null ? tile(ride.elevation_gain_m, "м набора высоты") : "");
 
   const best = Math.min(...ride.splits);
   $("splits").innerHTML = ride.kind !== "ride" && ride.splits.length ? "<h2>Сплиты</h2>" + ride.splits.map((s, i) =>

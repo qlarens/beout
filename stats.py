@@ -105,6 +105,28 @@ def compute_stats(points, weight_kg, kind=DEFAULT_ACTIVITY):
     }
 
 
+def elevation_gain(elevations, threshold_m, window):
+    """Набор высоты, м, по скользящему среднему из window точек, с гистерезисом threshold_m:
+    подъём начинается, когда высота ушла от низшей точки вверх больше порога (и считается от неё),
+    и кончается, когда упала от вершины больше порога. Шум и кочки меньше порога не копятся."""
+    gain, ref, climbing = 0.0, None, False
+    for i in range(len(elevations)):
+        part = elevations[max(0, i - window + 1):i + 1]
+        e = sum(part) / len(part)
+        if ref is None:
+            ref = e
+        elif climbing:
+            if e > ref:
+                gain, ref = gain + e - ref, e
+            elif ref - e > threshold_m:
+                climbing, ref = False, e
+        elif e < ref:
+            ref = e
+        elif e - ref > threshold_m:
+            gain, ref, climbing = gain + e - ref, e, True
+    return int(round(gain))
+
+
 def streaks(days, today):
     """Серии: (дней подряд, недель подряд) с тренировками.
 
