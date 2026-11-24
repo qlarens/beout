@@ -1,0 +1,52 @@
+#!/bin/bash
+# Принимает релиз от GitHub Actions. Это forced command ключа деплоя пользователя beout-deploy:
+#   git archive HEAD | ssh beout-deploy@VDS <sha коммита>
+# Кладёт код в /srv/beout/releases/<sha>, переключает current, перезапускает бота,
+# а если он не поднялся — возвращает предыдущий релиз.
+set -euo pipefail
+
+root=/srv/beout
+port=8090
+sha=${SSH_ORIGINAL_COMMAND:-}
+[[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "usage: git archive HEAD | ssh beout-deploy@host <40-hex sha>" >&2; exit 2; }
+
+exec 9>"$root/deploy.lock"
+flock 9
+
+rel=$root/releases/$sha
+rm -rf "$rel.tmp"
+mkdir -p "$rel.tmp"
+tar -x -C "$rel.tmp"
+rm -rf "$rel"
+mv "$rel.tmp" "$rel"
+
+# shortcut: пакеты ставятся в общий venv и при откате не возвращаются; хватает, пока зависимость одна (aiogram).
+req=$(sha256sum "$rel/requirements.txt" | cut -d' ' -f1)
+if [[ $(cat "$root/venv/.requirements.sha256" 2>/dev/null) != "$req" ]]; then
+    "$root/venv/bin/pip" install --quiet --disable-pip-version-check -r "$rel/requirements.txt"
+    echo "$req" > "$root/venv/.requirements.sha256"
+fi
+
+switch() { ln -sfn "$1" "$root/current.new" && mv -T "$root/current.new" "$root/current"; }
+prev=$(readlink "$root/current" || true)
+switch "$rel"
+sudo /usr/bin/systemctl restart beout
+
+# Бот поднимает веб-сервер после связи с Telegram; при Flood control это может занять минуты.
+for _ in $(seq 60); do
+    sleep 5
+    if curl -fsS -o /dev/null "http://127.0.0.1:$port/"; then
+        echo "deployed $sha"
+        # Храним 5 последних релизов, current всегда самый новый.
+        ls -1dt "$root"/releases/*/ | tail -n +6 | xargs -r rm -rf
+        exit 0
+    fi
+    systemctl is-active --quiet beout || break
+done
+
+echo "beout did not come up on $sha, rolling back to ${prev:-nothing}" >&2
+if [[ -n $prev && $prev != "$rel" ]]; then
+    switch "$prev"
+    sudo /usr/bin/systemctl restart beout
+fi
+exit 1
