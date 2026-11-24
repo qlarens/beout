@@ -278,6 +278,18 @@ class Storage:
                 )
         return session
 
+    def leave_session(self, session_id, user_id):
+        """Выход из сессии: тренировки участника отвязываются; ушёл последний — сессия распускается."""
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM session_members WHERE session_id = ? AND user_id = ?", (session_id, user_id)
+            )
+            self.conn.execute(
+                "UPDATE rides SET session_id = NULL WHERE session_id = ? AND user_id = ?", (session_id, user_id)
+            )
+            if not self.session_members(session_id):  # ссылка-приглашение больше не работает
+                self.conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+
     def current_session(self, user_id, now=None):
         """Последняя неистёкшая сессия, в которой участвует пользователь."""
         return self.conn.execute(

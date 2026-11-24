@@ -184,6 +184,8 @@
   <div id="ride-actions" class="hidden">
     <p></p>
     <button class="primary wide" id="share"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13v7h16v-7M12 3v12M7 8l5-5 5 5"/></svg>Поделиться карточкой</button>
+    <p></p>
+    <button class="wide" id="story"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="2.5" width="14" height="19" rx="3"/><circle cx="10" cy="8.5" r="1.5"/><path d="m19 15-4.5-4.5L5 20"/></svg>Карточка для Instagram</button>
   </div>
   <div id="splits"></div>
   <p class="hint" id="ride-hint"></p>
@@ -198,6 +200,8 @@
   <div id="session-people"></div>
   <p></p>
   <button class="wide" id="invite">Пригласить ещё</button>
+  <p></p>
+  <button class="wide danger" id="leave"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></svg>Покинуть совместную тренировку</button>
 </section>
 
 <div class="error hidden" id="error" role="alert"></div>
@@ -526,6 +530,7 @@ let sessionMap = null, sessionLayer = null, sessionLink = null;
 
 async function showSession(id) {
   show("session");
+  sessionId = id;
   if (!sessionMap) [sessionMap, sessionLayer] = makeMap("session-map");
   await renderSession(id, true);
   refreshTimer = setInterval(() => renderSession(id, false).catch(showError), 15000);
@@ -562,6 +567,15 @@ function invite() {
   tg ? tg.openTelegramLink(url) : window.open(url);
 }
 $("invite").addEventListener("click", invite);
+let sessionId = null;
+$("leave").addEventListener("click", async () => {
+  if (!(await confirmDialog("Покинуть совместную тренировку? Если в ней больше никого нет, она распустится, а ссылка перестанет работать."))) return;
+  try {
+    await post(`/api/sessions/${sessionId}/leave`);
+    haptic("warning");
+    await showHome();
+  } catch (e) { showError(e); }
+});
 $("together").addEventListener("click", async () => {
   try {
     if (tg) tg.HapticFeedback.impactOccurred("medium");
@@ -582,6 +596,18 @@ $("share").addEventListener("click", async () => {
     else if (tg) tg.showAlert("Карточка в чате с ботом — перешли её друзьям.");
   } catch (e) { showError(e); }
   $("share").disabled = false;
+});
+// Instagram не принимает картинки из Mini App напрямую: карточка приходит в чат, оттуда — в галерею.
+$("story").addEventListener("click", async () => {
+  if (tg) tg.HapticFeedback.impactOccurred("light");
+  $("story").disabled = true;
+  try {
+    await post(`/api/rides/${shareRideId}/story?tz=${new Date().getTimezoneOffset()}`);
+    haptic("success");
+    const text = "Карточка в чате с ботом: открой её, сохрани в галерею и добавь в историю Instagram.";
+    tg ? tg.showAlert(text) : alert(text);
+  } catch (e) { showError(e); }
+  $("story").disabled = false;
 });
 
 $("delete").addEventListener("click", async () => {
@@ -612,6 +638,8 @@ if (tg) tg.MainButton.onClick(() => {
       await post(`/api/rides/${id}/finish`);
       haptic("success");
       await renderRide(id, true);
+      // Бот не может выключить трансляцию пользователя — только напомнить.
+      tg.showAlert("Тренировка завершена. Трансляция геопозиции ещё идёт: останови её в чате с ботом — крестик на плашке трансляции вверху чата.");
     } catch (e) { showError(e); }
   });
 });

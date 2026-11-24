@@ -37,7 +37,7 @@ from aiogram.types import (
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
 from auth import validate_init_data
-from cards import render_card
+from cards import map_view, render_card, render_story
 from stats import compute_stats, elevation_gain, fmt_duration, fmt_pace, streaks
 from settings import (
     ACTIVITIES,
@@ -48,6 +48,10 @@ from settings import (
     ELEVATION_MIN_STEP_M,
     ELEVATION_SMOOTH_POINTS,
     ELEVATION_TIMEOUT_S,
+    MAP_CACHE_TILES,
+    MAP_TILES,
+    MAP_TIMEOUT_S,
+    MAP_USER_AGENT,
     RATING_POST_HOUR_UTC,
     RATING_TOP_N,
 )
@@ -66,7 +70,7 @@ ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 # Только для локальной отладки в обычном браузере, без Telegram. В проде не задавать!
 DEV_USER_ID = os.environ.get("DEV_USER_ID")
 # Поменял webapp/privacy.html — увеличь: бот попросит всех принять условия заново.
-POLICY_VERSION = 2
+POLICY_VERSION = 3
 PAGE_SIZE = 50
 NETWORK_RETRY_S = 10
 FLOOD_MAX_WAIT_S = 600
@@ -228,8 +232,46 @@ async def fetch_elevations(track):
     return elevations
 
 
-async def finish_and_report(bot, ride_id, ts=None):
-    """Закрывает тренировку и присылает итог — только если её не закрыли раньше."""
+LIVE_WARNING = (
+    "⚠️ Трансляция геопозиции ещё идёт, но больше не записывается. "
+    "Останови её: крестик на плашке трансляции вверху чата."
+)
+
+
+_tiles = {}  # правила OSM требуют кэшировать плитки
+
+
+async def fetch_tiles(keys):
+    """PNG плиток OSM по ключам (z, x, y), по одной; None — сервер недоступен, карточка будет без карты.
+
+    Уходят только номера плиток (район маршрута), без Telegram ID.
+    """
+    try:
+        async with ClientSession(
+            timeout=ClientTimeout(total=MAP_TIMEOUT_S), headers={"User-Agent": MAP_USER_AGENT}
+        ) as http:
+            for key in keys:
+                if key not in _tiles:
+                    async with http.get(MAP_TILES.format(*key)) as response:
+                        response.raise_for_status()
+                        _tiles[key] = await response.read()
+                    if len(_tiles) > MAP_CACHE_TILES:
+                        _tiles.pop(next(iter(_tiles)))  # самая старая
+    except (ClientError, asyncio.TimeoutError) as e:
+        logging.warning("Карта недоступна: %r", e)
+        return None
+    return {key: _tiles[key] for key in keys if key in _tiles}
+
+
+async def card_tiles(track):
+    return await fetch_tiles(map_view(track)[3]) if track else None
+
+
+async def finish_and_report(bot, ride_id, ts=None, manual=False):
+    """Закрывает тренировку и присылает итог — только если её не закрыли раньше.
+
+    manual — закрыли кнопкой или /stop: трансляция в Telegram при этом не останавливается.
+    """
     if not db.finish_ride(ride_id, ts):
         return
     ride = db.get_ride(ride_id)
@@ -238,9 +280,10 @@ async def finish_and_report(bot, ride_id, ts=None):
     if elevations:  # сервис недоступен — просто без высоты
         db.set_elevation(ride_id, elevation_gain(elevations, ELEVATION_MIN_STEP_M, ELEVATION_SMOOTH_POINTS))
         ride = db.get_ride(ride_id)
+    live = manual and (ride["live_until"] or 0) > time.time()
     await bot.send_message(
         ride["chat_id"],
-        ride_summary(ride),
+        ride_summary(ride) + (f"\n\n{LIVE_WARNING}" if live else ""),
         parse_mode="HTML",
         reply_markup=open_app_keyboard(
             ride["id"], "🗺 Маршрут на карте",
@@ -252,7 +295,8 @@ async def finish_and_report(bot, ride_id, ts=None):
 async def send_card(bot, ride):
     """Шлёт карточку тренировки в чат с владельцем. Возвращает (сообщение, подпись, кнопки)."""
     stats = compute_stats(db.get_points(ride["id"]), db.get_weight(ride["user_id"]), ride["kind"])
-    png = await asyncio.to_thread(render_card, ride["kind"], stats, record_labels(ride))
+    tiles = await card_tiles(stats["track"])
+    png = await asyncio.to_thread(render_card, ride["kind"], stats, record_labels(ride), tiles)
     caption = (
         f"{ACTIVITIES[ride['kind']]['title']}: {stats['distance_km']} км "
         f"за {fmt_duration(stats['moving_s'])} · {speed_line(ride, stats)}\n{APP_NAME}"
@@ -443,7 +487,7 @@ async def cmd_stop(message: Message):
     if not ride:
         await message.answer("Сейчас нет активной тренировки.")
         return
-    await finish_and_report(message.bot, ride["id"])
+    await finish_and_report(message.bot, ride["id"], manual=True)
 
 
 @dp.callback_query(F.data.regexp(r"^kind:\d+:(ride|run|walk)$"))
@@ -476,9 +520,9 @@ async def on_finish(callback: CallbackQuery):
     if not ride or ride["user_id"] != callback.from_user.id:
         await callback.answer("Поездка не найдена")
         return
-    await finish_and_report(callback.bot, ride["id"])
-    # Финиш не останавливает трансляцию в Telegram — новые точки просто не записываются.
-    await callback.answer("Готово. Трансляцию геопозиции можно остановить.")
+    await finish_and_report(callback.bot, ride["id"], manual=True)
+    # Финиш не останавливает трансляцию в Telegram: бот не может выключить чужую геопозицию.
+    await callback.answer(LIVE_WARNING, show_alert=True)
 
 
 # ---------- геопозиция ----------
@@ -682,15 +726,20 @@ def local_date(ts, tz):
     return datetime.fromtimestamp(ts - tz * 60, timezone.utc).date()
 
 
-async def api_summary(request):
-    """Итоги недели и месяца по типам, серии и личные рекорды."""
-    user_id = current_user_id(request)
+def read_tz(request):
     try:
         tz = int(request.query.get("tz", "0"))
         if not -840 <= tz <= 840:
             raise ValueError
     except ValueError:
         raise web.HTTPBadRequest(text="tz — смещение в минутах, как getTimezoneOffset()")
+    return tz
+
+
+async def api_summary(request):
+    """Итоги недели и месяца по типам, серии и личные рекорды."""
+    user_id = current_user_id(request)
+    tz = read_tz(request)
 
     def start_of(day):  # полночь по времени пользователя, unix time
         return datetime(day.year, day.month, day.day, tzinfo=timezone.utc).timestamp() + tz * 60
@@ -753,6 +802,16 @@ async def api_join_session(request):
     if not session:
         raise web.HTTPNotFound(text="Совместная тренировка не найдена или уже закончилась")
     return web.json_response({"id": session["id"]})
+
+
+async def api_leave_session(request):
+    """Покинуть совместную тренировку; ушёл последний — она распускается."""
+    user_id = current_user_id(request)
+    session_id = int(request.match_info["session_id"])
+    if not db.is_member(session_id, user_id):
+        raise web.HTTPNotFound(text="Совместная тренировка не найдена")
+    db.leave_session(session_id, user_id)
+    return web.json_response({"left": True})
 
 
 async def api_session(request):
@@ -852,7 +911,7 @@ async def api_set_kind(request):
 
 async def api_finish(request):
     ride = own_ride(request)
-    await finish_and_report(request.app[BOT_KEY], ride["id"])
+    await finish_and_report(request.app[BOT_KEY], ride["id"], manual=True)
     return web.json_response({"ride": ride_to_json(db.get_ride(ride["id"]))})
 
 
@@ -874,6 +933,22 @@ async def api_share(request):
         logging.warning("savePreparedInlineMessage: %r", e)
         return web.json_response({"prepared_id": None})
     return web.json_response({"prepared_id": prepared.id})
+
+
+async def api_story(request):
+    """Карточка 9:16 для Instagram Stories — в чат с ботом: оттуда её сохраняют в галерею."""
+    ride = own_ride(request)
+    date = f"{local_date(ride['started_at'], read_tz(request)):%d.%m.%Y}"
+    stats = compute_stats(db.get_points(ride["id"]), db.get_weight(ride["user_id"]), ride["kind"])
+    tiles = await card_tiles(stats["track"])
+    png = await asyncio.to_thread(
+        render_story, ride["kind"], stats, record_labels(ride), tiles, ride["elevation_gain_m"], date
+    )
+    await request.app[BOT_KEY].send_photo(
+        ride["chat_id"], BufferedInputFile(png, filename="beout-story.png"),
+        caption="Для Instagram: открой картинку, сохрани в галерею и добавь в историю.",
+    )
+    return web.json_response({"sent": True})
 
 
 async def api_set_weight(request):
@@ -912,12 +987,14 @@ def make_web_app(bot):
     app.router.add_post("/api/sessions", api_create_session)
     app.router.add_post("/api/sessions/join/{token:[\\w-]+}", api_join_session)
     app.router.add_get("/api/sessions/{session_id:\\d+}", api_session)
+    app.router.add_post("/api/sessions/{session_id:\\d+}/leave", api_leave_session)
     app.router.add_get("/api/sos", api_sos)
     app.router.add_post("/api/sos/send", api_sos_send)
     app.router.add_delete("/api/sos/{contact_id:\\d+}", api_sos_remove)
     app.router.add_post("/api/rides/{ride_id:\\d+}/finish", api_finish)
     app.router.add_post("/api/rides/{ride_id:\\d+}/kind", api_ride_kind)
     app.router.add_post("/api/rides/{ride_id:\\d+}/share", api_share)
+    app.router.add_post("/api/rides/{ride_id:\\d+}/story", api_story)
     app.router.add_post("/api/weight", api_set_weight)
     app.router.add_post("/api/kind", api_set_kind)
     return app

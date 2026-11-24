@@ -1,6 +1,7 @@
 """Тесты: python -m unittest -v"""
 import hashlib
 import hmac
+import io
 import json
 import os
 import sqlite3
@@ -18,17 +19,20 @@ os.environ.update(BOT_TOKEN=TOKEN, WEBAPP_URL="https://example.test", DB_PATH=":
 os.environ.pop("DEV_USER_ID", None)
 
 from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
+from PIL import Image  # noqa: E402
 
 import bot  # noqa: E402
 
 # Тесты не ходят в Open-Meteo; настоящий запрос проверяет ElevationTest на локальном сервере.
 REAL_FETCH_ELEVATIONS = bot.fetch_elevations
 bot.fetch_elevations = AsyncMock(return_value=None)
+REAL_FETCH_TILES = bot.fetch_tiles  # и в OSM тоже: см. MapTest
+bot.fetch_tiles = AsyncMock(return_value=None)
 from auth import validate_init_data  # noqa: E402
-from cards import fit_route, render_card  # noqa: E402
+from cards import MAP_H, MAP_W, TILE, map_view, project, render_card, render_story  # noqa: E402
 from aiohttp import web  # noqa: E402
 from stats import compute_stats, elevation_gain, streaks  # noqa: E402
-from settings import SESSION_TTL_S  # noqa: E402
+from settings import MAP_MAX_ZOOM, SESSION_TTL_S  # noqa: E402
 from storage import SCHEMA, STALE_AFTER_S, Storage  # noqa: E402
 
 
@@ -252,6 +256,18 @@ class StorageTest(unittest.TestCase):
         alone = self.db.start_ride(2, 2, 4, now + SESSION_TTL_S + 10)  # сессия истекла
         self.assertIsNone(self.db.get_ride(alone)["session_id"])
 
+    def test_leave_session(self):
+        now = time.time()
+        session = self.db.create_session(1, now)
+        self.db.join_session(session["token"], 2, now)
+        ride = self.db.start_ride(2, 2, 1, now)
+        self.db.leave_session(session["id"], 2)
+        self.assertIsNone(self.db.get_ride(ride)["session_id"])  # ушедший больше не виден остальным
+        self.assertEqual(self.db.session_members(session["id"]), [1])
+        self.db.leave_session(session["id"], 1)  # ушёл последний — сессия распущена
+        self.assertIsNone(self.db.get_session(session["id"]))
+        self.assertIsNone(self.db.join_session(session["token"], 3, now))  # ссылка не работает
+
     def test_group_rating(self):
         week = 1_000_000.0
         for user_id, kind, km in ((1, "run", 5), (1, "run", 3), (2, "run", 10), (3, "run", 20), (1, "ride", 2)):
@@ -399,20 +415,63 @@ class ElevationTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await REAL_FETCH_ELEVATIONS(track))  # сервис недоступен — без высоты
 
 
-class CardTest(unittest.TestCase):
-    def test_card_is_png(self):
-        for points in ([], line(1), track((1.2, 10))):
-            png = render_card("run", compute_stats(points, 70, "run"), ["Новый рекорд: самая длинная"])
-            self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n")
+def tile_png(shade=200):
+    out = io.BytesIO()
+    Image.new("L", (TILE, TILE), shade).save(out, "PNG")
+    return out.getvalue()
 
-    def test_route_fits_box(self):
-        xy = fit_route([(52.0, 21.0), (52.01, 21.0), (52.01, 21.05)], (0, 0, 100, 200))
-        xs, ys = [x for x, _ in xy], [y for _, y in xy]
-        self.assertAlmostEqual(min(xs), 0)
-        self.assertAlmostEqual(max(xs), 100)  # шире, чем выше: упирается в ширину
-        self.assertTrue(all(0 <= y <= 200 for y in ys))
+
+class CardTest(unittest.TestCase):
+    def test_cards_are_png(self):
+        for points in ([], line(1), track((1.2, 10))):
+            stats = compute_stats(points, 70, "run")
+            keys = map_view(stats["track"])[3] if stats["track"] else []
+            tiles = {key: tile_png() for key in keys} | dict.fromkeys(keys[:1], b"broken")  # битая — пропуск
+            for tiles in (None, tiles):
+                png = render_card("run", stats, ["Новый рекорд: самая длинная"], tiles)
+                self.assertEqual(Image.open(io.BytesIO(png)).size, (1080, 1350))
+                png = render_story("run", stats, ["Новый рекорд: самая длинная"], tiles, 12, "24.11.2026")
+                self.assertEqual(Image.open(io.BytesIO(png)).size, (1080, 1920))
+
+    def test_map_view(self):
+        route = [(52.0, 21.0), (52.01, 21.0), (52.01, 21.05)]
+        z, left, top, tiles = map_view(route)
+        xs, ys = zip(*(project(lat, lon, z) for lat, lon in route))
+        self.assertTrue(all(left < x < left + MAP_W for x in xs) and all(top < y < top + MAP_H for y in ys))
         self.assertGreater(ys[0], ys[1])  # север — вверху
-        self.assertEqual(fit_route([(52.0, 21.0)], (0, 0, 100, 200)), [(50, 100)])
+        z_out = map_view([(52.0, 20.9), (52.0, 21.15)])[0]
+        self.assertLess(z_out, z)  # шире маршрут — мельче карта
+        self.assertEqual({(tz, tx, ty) for tz, tx, ty in tiles if tz == z}, set(tiles))
+        covered = {(x, y) for _, x, y in tiles}  # плитки покрывают углы окна
+        for cx, cy in ((left, top), (left + MAP_W - 1, top + MAP_H - 1)):
+            self.assertIn((int(cx // TILE), int(cy // TILE)), covered)
+        self.assertEqual(map_view([(52.0, 21.0)])[0], MAP_MAX_ZOOM)  # одна точка — крупнейший зум
+
+
+class MapTest(unittest.IsolatedAsyncioTestCase):
+    async def test_fetch_tiles_with_cache(self):
+        seen = []
+
+        async def osm(request):
+            seen.append((request.match_info["z"], request.headers["User-Agent"]))
+            return web.Response(body=tile_png(), content_type="image/png")
+
+        app = web.Application()
+        app.router.add_get("/{z}/{x}/{y}.png", osm)
+        server = TestServer(app)
+        await server.start_server()
+        self.addAsyncCleanup(server.close)
+        bot._tiles.clear()
+        keys = [(16, 1, 2), (16, 1, 3)]
+        with patch.object(bot, "MAP_TILES", str(server.make_url("/")) + "{}/{}/{}.png"):  # make_url экранирует {}
+            tiles = await REAL_FETCH_TILES(keys)
+            self.assertEqual(set(tiles), set(keys))
+            await REAL_FETCH_TILES(keys)
+        self.assertEqual(len(seen), 2)  # второй раз — из кэша
+        self.assertTrue(seen[0][1].startswith("beout-bot/"))  # OSM требует свой User-Agent
+        bot._tiles.clear()
+        with patch.object(bot, "MAP_TILES", "http://127.0.0.1:1/{}/{}/{}.png"):
+            self.assertIsNone(await REAL_FETCH_TILES(keys))  # OSM недоступен — карточка без карты
 
 
 class ApiTest(unittest.IsolatedAsyncioTestCase):
@@ -451,12 +510,13 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_finish_from_mini_app(self):
         self.consent(1, 2)
-        ride_id = bot.db.start_ride(1, 1, 1, time.time())
+        ride_id = bot.db.start_ride(1, 1, 1, time.time(), live_until=time.time() + 900)
         self.assertEqual((await self.call("POST", f"/api/rides/{ride_id}/finish", 2)).status, 404)
         response = await self.call("POST", f"/api/rides/{ride_id}/finish", 1)
         self.assertEqual(response.status, 200)
         self.assertFalse((await response.json())["ride"]["active"])
         self.tg.send_message.assert_awaited_once()  # итог пришёл в чат
+        self.assertIn(bot.LIVE_WARNING, self.tg.send_message.call_args.args[1])  # трансляция ещё идёт
 
     async def test_weight_validation(self):
         self.consent(1)
@@ -487,6 +547,21 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.tg.save_prepared_inline_message.side_effect = bot.TelegramAPIError(method=None, message="nope")
         response = await self.call("POST", f"/api/rides/{ride_id}/share", 1)
         self.assertEqual(await response.json(), {"prepared_id": None})
+
+    async def test_story_card(self):
+        self.consent(1, 2)
+        ride_id = finished_ride(bot.db, 1, "run", 12 * 86400 - 1800, 1.5)  # 12.01.1970 23:30 UTC
+        path = f"/api/rides/{ride_id}/story?tz=-60"  # у пользователя UTC+1 — уже 13-е
+        self.assertEqual((await self.call("POST", path, 2)).status, 404)
+        self.assertEqual((await self.call("POST", f"/api/rides/{ride_id}/story?tz=x", 1)).status, 400)
+        self.tg.send_photo.reset_mock()
+        with patch.object(bot, "render_story", wraps=bot.render_story) as render:
+            self.assertEqual((await self.call("POST", path, 1)).status, 200)
+        self.assertEqual(render.call_args.args[-1], "13.01.1970")
+        photo = self.tg.send_photo.call_args
+        self.assertEqual(photo.args[0], 1)
+        self.assertEqual(Image.open(io.BytesIO(photo.args[1].data)).size, (1080, 1920))
+        self.assertIn("Instagram", photo.kwargs["caption"])
 
     async def test_history_filter_summary_delete(self):
         self.consent(1, 2)
@@ -543,6 +618,12 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("user_id", people["User2"])  # чужие id не отдаём
         self.assertEqual((await (await self.call("GET", "/api/rides", 2)).json())["session_id"], created["id"])
 
+        self.assertEqual((await self.call("POST", f"{path}/leave", 3)).status, 404)  # не участник
+        for user_id in (2, 1):
+            self.assertEqual((await self.call("POST", f"{path}/leave", user_id)).status, 200)
+            self.assertIsNone((await (await self.call("GET", "/api/rides", user_id)).json())["session_id"])
+        self.assertIsNone(bot.db.get_session(created["id"]))  # ушли все — распущена
+
     async def test_sos(self):
         self.consent(1)
         invite = (await (await self.call("GET", "/api/sos", 1)).json())["invite"]
@@ -576,6 +657,7 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
             ride = (await (await self.call("POST", f"/api/rides/{ride_id}/finish", 1)).json())["ride"]
         self.assertEqual(ride["elevation_gain_m"], 23)  # сглаживание по 3 точкам: вершина 123.3
         self.assertIn("Набор высоты: 23 м", self.tg.send_message.call_args.args[1])
+        self.assertNotIn(bot.LIVE_WARNING, self.tg.send_message.call_args.args[1])  # трансляции не было
 
     async def test_change_kind(self):
         self.consent(1, 2)
@@ -766,10 +848,13 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.db.active_ride(1)["kind"], "walk")
         ride = bot.db.active_ride(1)
 
-        await bot.on_finish(self.callback(f"finish:{ride['id']}"))
+        finish = self.callback(f"finish:{ride['id']}")
+        await bot.on_finish(finish)
         await bot.on_finish(self.callback(f"finish:{ride['id']}"))
         self.assertIsNotNone(bot.db.get_ride(ride["id"])["ended_at"])
         self.assertEqual(self.tg.send_message.await_count, 1)  # итог — ровно один раз
+        self.assertEqual(finish.answer.call_args, ((bot.LIVE_WARNING,), {"show_alert": True}))
+        self.assertIn(bot.LIVE_WARNING, self.tg.send_message.call_args.args[1])
         summary = self.tg.send_message.call_args.kwargs["reply_markup"]
         self.assertIn(f"share:{ride['id']}", [b.callback_data for row in summary.inline_keyboard for b in row])
 
