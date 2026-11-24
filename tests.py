@@ -9,7 +9,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from urllib.parse import urlencode
 
 TOKEN = "123:test"
@@ -295,10 +295,13 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(bot.has_consent(1))
 
     async def test_waits_out_flood_control(self):
-        flood = bot.TelegramRetryAfter(method=None, message="Too Many Requests", retry_after=0)
-        tg = SimpleNamespace(me=AsyncMock(side_effect=[flood, flood, "me"]))
-        self.assertEqual(await bot.wait_out_flood(tg), "me")
-        self.assertEqual(tg.me.await_count, 3)
+        flood = bot.TelegramRetryAfter(method=None, message="Too Many Requests", retry_after=32)
+        offline = bot.TelegramNetworkError(method=None, message="Cannot connect")
+        tg = SimpleNamespace(me=AsyncMock(side_effect=[flood, offline, flood] + [flood] * 5 + ["me"]))
+        with patch.object(bot.asyncio, "sleep", AsyncMock()) as sleep:
+            self.assertEqual(await bot.wait_out_flood(tg), "me")
+        delays = [c.args[0] for c in sleep.await_args_list]
+        self.assertEqual(delays, [32, bot.NETWORK_RETRY_S, 64, 128, 256, 512, 600, 600])
 
     async def test_finish_button(self):
         await bot.on_consent(self.callback("consent"))

@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
+from aiogram.exceptions import TelegramAPIError, TelegramNetworkError, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     BotCommand,
@@ -48,6 +48,8 @@ DEV_USER_ID = os.environ.get("DEV_USER_ID")
 # Поменял webapp/privacy.html — увеличь: бот попросит всех принять условия заново.
 POLICY_VERSION = 1
 PAGE_SIZE = 50
+NETWORK_RETRY_S = 10
+FLOOD_MAX_WAIT_S = 600
 
 WEBAPP_DIR = Path(__file__).parent / "webapp"
 
@@ -465,13 +467,23 @@ async def housekeeping(bot):
 
 
 async def wait_out_flood(bot):
-    """Ждёт, пока Telegram снимет лимит запросов. Падать нельзя: перезапуск продлил бы лимит."""
+    """Ждёт, пока Telegram доступен и снял лимит запросов.
+
+    Падать нельзя: каждый перезапуск шлёт пачку запросов и продлевает лимит (Flood control).
+    """
+    floods = 0
     while True:
         try:
             return await bot.me()  # результат кэшируется, start_polling его переиспользует
         except TelegramRetryAfter as e:
-            logging.warning("Telegram просит подождать %s с (Flood control)", e.retry_after)
-            await asyncio.sleep(e.retry_after)
+            # Повтор ровно через retry_after снова продлевает лимит — ждём всё дольше, до 10 минут.
+            delay = min(e.retry_after * 2**floods, FLOOD_MAX_WAIT_S)
+            floods += 1
+            logging.warning("Flood control: Telegram просит %s с, ждём %s с", e.retry_after, delay)
+            await asyncio.sleep(delay)
+        except TelegramNetworkError as e:  # WARP иногда рвёт соединение — ждём, а не падаем
+            logging.warning("Нет связи с Telegram, повтор через %s с: %r", NETWORK_RETRY_S, e)
+            await asyncio.sleep(NETWORK_RETRY_S)
 
 
 async def main():
