@@ -1,4 +1,4 @@
-"""Велотрекер: Telegram-бот + сервер для Mini App в одном процессе.
+"""Трекер тренировок: Telegram-бот + сервер для Mini App в одном процессе.
 
 Бот принимает трансляцию геопозиции (Live Location) и сохраняет точки маршрута.
 Telegram присылает обновления, даже когда телефон заблокирован, поэтому
@@ -12,8 +12,13 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.exceptions import TelegramAPIError, TelegramNetworkError, TelegramRetryAfter
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+)
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     BotCommand,
@@ -32,7 +37,7 @@ from aiohttp import web
 from auth import validate_init_data
 from cards import render_card
 from stats import compute_stats, fmt_duration, fmt_pace, streaks
-from settings import ACTIVITIES, APP_NAME
+from settings import ACTIVITIES, APP_NAME, RATING_POST_HOUR_UTC, RATING_TOP_N
 from storage import STAT_KEYS, Storage
 
 # Секреты — только из окружения, чтобы токен не лежал в коде.
@@ -48,7 +53,7 @@ ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 # Только для локальной отладки в обычном браузере, без Telegram. В проде не задавать!
 DEV_USER_ID = os.environ.get("DEV_USER_ID")
 # Поменял webapp/privacy.html — увеличь: бот попросит всех принять условия заново.
-POLICY_VERSION = 1
+POLICY_VERSION = 2
 PAGE_SIZE = 50
 NETWORK_RETRY_S = 10
 FLOOD_MAX_WAIT_S = 600
@@ -59,6 +64,12 @@ ASSETS_DIR = Path(__file__).parent / "assets"
 logging.basicConfig(level=logging.INFO)
 db = Storage(DB_PATH)
 dp = Dispatcher()
+# Личные команды и трансляция — только в личке: /export в группе выложил бы данные всем.
+private = Router()
+private.message.filter(F.chat.type == "private")
+private.edited_message.filter(F.chat.type == "private")
+dp.include_router(private)
+GROUP_CHATS = {"group", "supergroup"}
 
 COMMANDS = [
     BotCommand(command="start", description="Как начать тренировку"),
@@ -67,6 +78,7 @@ COMMANDS = [
     BotCommand(command="privacy", description="Условия и конфиденциальность"),
     BotCommand(command="export", description="Выгрузить мои данные"),
     BotCommand(command="delete", description="Удалить все мои данные"),
+    BotCommand(command="top", description="Рейтинг группы за неделю"),
 ]
 
 CONSENT_TEXT = (
@@ -240,7 +252,7 @@ async def reply_in_place(callback: CallbackQuery, text, reply_markup=None):
 
 # ---------- согласие, данные пользователя ----------
 
-@dp.message(CommandStart())
+@private.message(CommandStart())
 async def cmd_start(message: Message):
     if not has_consent(message.from_user.id):
         await message.answer(CONSENT_TEXT, reply_markup=consent_keyboard())
@@ -260,7 +272,7 @@ async def on_consent(callback: CallbackQuery):
     )
 
 
-@dp.message(Command("privacy"))
+@private.message(Command("privacy"))
 async def cmd_privacy(message: Message):
     await message.answer(
         "Условия использования и политика конфиденциальности — по кнопке ниже.\n"
@@ -269,7 +281,7 @@ async def cmd_privacy(message: Message):
     )
 
 
-@dp.message(Command("export"))
+@private.message(Command("export"))
 async def cmd_export(message: Message):
     data = json.dumps(db.export_user(message.from_user.id), ensure_ascii=False, indent=1)
     await message.answer_document(
@@ -278,10 +290,10 @@ async def cmd_export(message: Message):
     )
 
 
-@dp.message(Command("delete"))
+@private.message(Command("delete"))
 async def cmd_delete(message: Message):
     await message.answer(
-        "Удалить все твои данные: поездки, маршруты, вес и согласие с условиями? "
+        "Удалить все твои данные: тренировки, маршруты, вес, участие в сессиях и рейтингах, согласие с условиями? "
         "Отменить это нельзя. Если нужна копия — сначала /export.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🗑 Да, удалить всё", callback_data="delete:yes")],
@@ -307,7 +319,7 @@ async def on_delete(callback: CallbackQuery):
 
 # ---------- команды ----------
 
-@dp.message(Command("weight"))
+@private.message(Command("weight"))
 async def cmd_weight(message: Message, command: CommandObject):
     if not has_consent(message.from_user.id):
         await message.answer(CONSENT_TEXT, reply_markup=consent_keyboard())
@@ -323,11 +335,11 @@ async def cmd_weight(message: Message, command: CommandObject):
     await message.answer(f"Готово, вес: {weight:g} кг ✅")
 
 
-@dp.message(Command("stop"))
+@private.message(Command("stop"))
 async def cmd_stop(message: Message):
     ride = db.active_ride(message.from_user.id)
     if not ride:
-        await message.answer("Сейчас нет активной поездки.")
+        await message.answer("Сейчас нет активной тренировки.")
         return
     await finish_and_report(message.bot, ride["id"])
 
@@ -369,7 +381,7 @@ async def on_finish(callback: CallbackQuery):
 
 # ---------- геопозиция ----------
 
-@dp.message(F.location)
+@private.message(F.location)
 async def on_location(message: Message):
     loc = message.location
     if not loc.live_period:
@@ -403,7 +415,7 @@ async def on_location(message: Message):
     )
 
 
-@dp.edited_message(F.location)
+@private.edited_message(F.location)
 async def on_location_update(message: Message):
     """Каждое обновление трансляции приходит как редактирование того же сообщения."""
     ride = db.find_ride_by_message(message.chat.id, message.message_id)
@@ -418,6 +430,97 @@ async def on_location_update(message: Message):
     # Когда трансляцию останавливают, приходит последнее обновление без live_period.
     if not loc.live_period:
         await finish_and_report(message.bot, ride["id"])
+
+
+# ---------- рейтинг в группах ----------
+
+def week_start(now):
+    """Понедельник 00:00 UTC текущей недели, unix time."""
+    # shortcut: неделя по UTC — в Европе граница сдвинута на 1–3 часа; хранить пояс группы, если будут жалобы.
+    day = datetime.fromtimestamp(now, timezone.utc).date()
+    monday = day - timedelta(days=day.weekday())
+    return datetime(monday.year, monday.month, monday.day, tzinfo=timezone.utc).timestamp()
+
+
+async def member_name(bot, chat_id, user_id):
+    """Имя участника группы; None — вышел из группы."""
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+    except TelegramAPIError:
+        return None
+    return None if member.status in ("left", "kicked") else member.user.full_name
+
+
+async def rating_text(bot, chat_id, since, title):
+    """Рейтинг по дистанции за неделю с since, отдельно по типам. Простой текст: имена не экранировать."""
+    lines = [f"{title} {datetime.fromtimestamp(since, timezone.utc):%d.%m}–"
+             f"{datetime.fromtimestamp(since + 6 * 86400, timezone.utc):%d.%m}"]
+    rating = db.group_rating(chat_id, since, since + 7 * 86400)
+    for kind in ACTIVITIES:
+        places = []
+        for user_id, km in rating.get(kind, []):
+            name = await member_name(bot, chat_id, user_id)
+            if name:
+                places.append(f"{len(places) + 1}. {name} — {km} км")
+            if len(places) == RATING_TOP_N:
+                break
+        if places:
+            lines += ["", ACTIVITIES[kind]["title"], *places]
+    if len(lines) == 1:
+        lines += ["", "Пока никто из участников не тренировался."]
+    lines += ["", "В рейтинге только те, кто нажал «Участвовать». Тренировки записывает бот в личном чате."]
+    return "\n".join(lines)
+
+
+def rating_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Участвовать", callback_data="rating:join"),
+        InlineKeyboardButton(text="Выйти", callback_data="rating:leave"),
+    ]])
+
+
+@dp.message(Command("top"))
+async def cmd_top(message: Message):
+    if message.chat.type not in GROUP_CHATS:
+        await message.answer(
+            "Рейтинг работает в группах: добавь меня в групповой чат (например, чат клуба) и отправь там /top."
+        )
+        return
+    db.add_group(message.chat.id)
+    text = await rating_text(message.bot, message.chat.id, week_start(time.time()), "🏆 Рейтинг недели")
+    await message.answer(text, reply_markup=rating_keyboard())
+
+
+@dp.callback_query(F.data.in_({"rating:join", "rating:leave"}))
+async def on_rating(callback: CallbackQuery):
+    user_id, join = callback.from_user.id, callback.data == "rating:join"
+    if join and not has_consent(user_id):
+        await callback.answer(
+            f"Сначала открой @{(await callback.bot.me()).username}, нажми «Старт» и прими условия.",
+            show_alert=True,
+        )
+        return
+    db.set_group_member(callback.message.chat.id, user_id, join)
+    await callback.answer(
+        "Ты в рейтинге этой группы." if join else "Ты больше не в рейтинге этой группы.", show_alert=True
+    )
+
+
+async def post_weekly_ratings(bot, now):
+    """По понедельникам — итоги прошлой недели во все группы, где есть участники."""
+    dt = datetime.fromtimestamp(now, timezone.utc)
+    if dt.weekday() != 0 or dt.hour < RATING_POST_HOUR_UTC:
+        return
+    week = f"{dt:%G-W%V}"
+    for chat_id in db.groups_to_post(week):
+        db.mark_posted(chat_id, week)  # до отправки: сбой не повторяется каждую минуту
+        try:
+            text = await rating_text(bot, chat_id, week_start(now) - 7 * 86400, "🏆 Итоги недели")
+            await bot.send_message(chat_id, text, reply_markup=rating_keyboard())
+        except TelegramForbiddenError:
+            db.forget_group(chat_id)  # бота удалили из группы
+        except TelegramAPIError:
+            logging.exception("Не удалось отправить рейтинг в %s", chat_id)
 
 
 @dp.errors()
@@ -467,6 +570,7 @@ async def api_rides(request):
         "kind": db.get_kind(user_id),
         "rides": rides,
         "has_more": len(rides) == PAGE_SIZE,
+        "session_id": (session := db.current_session(user_id)) and session["id"],
     })
 
 
@@ -514,6 +618,61 @@ async def api_ride(request):
     return web.json_response({
         "ride": {**ride_to_json(ride), "splits": stats["splits"], "records": db.new_records(ride)},
         "points": stats["track"],  # [[lat, lon]] без выбросов GPS
+    })
+
+
+_names = {}
+
+
+async def user_name(bot, user_id):
+    """Имя для совместной тренировки: Telegram отдаёт его, раз человек запускал бота."""
+    # shortcut: кэш на время работы процесса — новое имя видно после перезапуска.
+    if user_id not in _names:
+        try:
+            _names[user_id] = (await bot.get_chat(user_id)).first_name or "Участник"
+        except TelegramAPIError:
+            return "Участник"
+    return _names[user_id]
+
+
+async def session_link(bot, session):
+    """Приглашение: Mini App получит session_<token> в start_param."""
+    return f"https://t.me/{(await bot.me()).username}?startapp=session_{session['token']}"
+
+
+async def api_create_session(request):
+    session = db.create_session(current_user_id(request))
+    return web.json_response({"id": session["id"], "link": await session_link(request.app[BOT_KEY], session)})
+
+
+async def api_join_session(request):
+    session = db.join_session(request.match_info["token"], current_user_id(request))
+    if not session:
+        raise web.HTTPNotFound(text="Совместная тренировка не найдена или уже закончилась")
+    return web.json_response({"id": session["id"]})
+
+
+async def api_session(request):
+    """Участники совместной тренировки: имя, последняя тренировка в сессии, маршрут. Только для участников."""
+    user_id = current_user_id(request)
+    session_id = int(request.match_info["session_id"])
+    if not db.is_member(session_id, user_id):
+        raise web.HTTPNotFound(text="Совместная тренировка не найдена")
+    rides = {r["user_id"]: r for r in db.session_rides(session_id)}  # по started_at: остаётся последняя
+    participants = []
+    for member in db.session_members(session_id):
+        ride = rides.get(member)
+        participants.append({
+            "you": member == user_id,
+            "name": await user_name(request.app[BOT_KEY], member),
+            "ride": ride and ride_to_json(ride),
+            "points": compute_stats(db.get_points(ride["id"]), 0, ride["kind"])["track"] if ride else [],
+        })
+    session = db.get_session(session_id)
+    return web.json_response({
+        "created_at": session["created_at"],
+        "link": await session_link(request.app[BOT_KEY], session),  # участники могут звать других
+        "participants": participants,
     })
 
 
@@ -605,6 +764,9 @@ def make_web_app(bot):
     app.router.add_get("/api/rides/{ride_id:\\d+}", api_ride)
     app.router.add_delete("/api/rides/{ride_id:\\d+}", api_delete_ride)
     app.router.add_get("/api/summary", api_summary)
+    app.router.add_post("/api/sessions", api_create_session)
+    app.router.add_post("/api/sessions/join/{token:[\\w-]+}", api_join_session)
+    app.router.add_get("/api/sessions/{session_id:\\d+}", api_session)
     app.router.add_post("/api/rides/{ride_id:\\d+}/finish", api_finish)
     app.router.add_post("/api/rides/{ride_id:\\d+}/kind", api_ride_kind)
     app.router.add_post("/api/rides/{ride_id:\\d+}/share", api_share)
@@ -624,6 +786,7 @@ async def housekeeping(bot):
                 except Exception:  # пользователь заблокировал бота и т.п. — поездка всё равно закрыта
                     logging.exception("Не удалось отправить итог поездки %s", ride_id)
             db.backup(BACKUP_DIR)
+            await post_weekly_ratings(bot, time.time())
         except Exception as e:
             logging.exception("Фоновая задача упала")
             await notify_admin(bot, f"⚠️ Фоновая задача: {e!r}")
@@ -654,9 +817,9 @@ async def main():
     bot = Bot(BOT_TOKEN)
     await wait_out_flood(bot)
     try:
-        # Кнопка «Мои поездки» слева от поля ввода в чате с ботом.
+        # Кнопка «Мои тренировки» слева от поля ввода в чате с ботом.
         await bot.set_chat_menu_button(
-            menu_button=MenuButtonWebApp(text="Мои поездки", web_app=WebAppInfo(url=f"{WEBAPP_URL}/"))
+            menu_button=MenuButtonWebApp(text="Мои тренировки", web_app=WebAppInfo(url=f"{WEBAPP_URL}/"))
         )
         await bot.set_my_commands(COMMANDS)
     except TelegramAPIError as e:

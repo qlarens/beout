@@ -84,7 +84,8 @@
   .big .pair .num { font-size: 44px; }
   .big .label { color: var(--hint); font-size: 14px; margin-top: 4px; }
 
-  #map { height: 46vh; border-radius: 14px; margin-bottom: 12px; background: var(--card); }
+  #map, .map { height: 46vh; border-radius: 14px; margin-bottom: 12px; background: var(--card); }
+  .swatch { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--on-accent); flex: none; }
   #map.small { height: 30vh; }
   [data-theme="dark"] .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.85) contrast(.9); }
 
@@ -128,6 +129,8 @@
   <div id="active-card"></div>
   <div class="chips" id="home-kinds" role="group" aria-label="Тип тренировки"></div>
   <button class="primary wide" id="start">Начать тренировку</button>
+  <p></p>
+  <button class="wide" id="together"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.6 2.9-5.5 6.5-5.5s6.5 1.9 6.5 5.5"/><circle cx="17" cy="9" r="2.5"/><path d="M17 14.5c2.6 0 4.5 1.4 4.5 4.5"/></svg>Совместная тренировка</button>
   <h2>Последняя тренировка</h2>
   <div id="last-ride"></div>
   <p class="hint" id="streak"></p>
@@ -176,6 +179,16 @@
   <div id="splits"></div>
   <p class="hint" id="ride-hint"></p>
   <button class="wide danger hidden" id="delete"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/></svg>Удалить тренировку</button>
+</section>
+
+<section id="session" class="hidden">
+  <h1>Совместная тренировка</h1>
+  <p class="hint">Каждый запускает трансляцию геопозиции в чате с ботом — тренировка сама привяжется
+    к этой сессии (в течение 12 часов после создания). Маршруты видят только участники.</p>
+  <div id="session-map" class="map"></div>
+  <div id="session-people"></div>
+  <p></p>
+  <button class="wide" id="invite">Пригласить ещё</button>
 </section>
 
 <div class="error hidden" id="error" role="alert"></div>
@@ -337,6 +350,7 @@ async function showHome() {
   $("active-card").innerHTML = last && last.active ? rideRow(last) : "";
   $("last-ride").innerHTML = !last ? '<p class="hint">Пока пусто — самое время начать.</p>' : last.active ? "" : rideRow(last);
   kindChips($("home-kinds"), me.kind, pickDefaultKind(showHome));
+  $("together").lastChild.textContent = me.session_id ? "Открыть совместную тренировку" : "Совместная тренировка";
   $("streak").textContent = sum.streak_days || sum.streak_weeks
     ? `Серия: ${plural(sum.streak_days, "день", "дня", "дней")} · ${plural(sum.streak_weeks, "неделя", "недели", "недель")} подряд`
     : "";
@@ -401,13 +415,22 @@ $("privacy-link").addEventListener("click", (e) => {
 
 // ---------- тренировка: идёт — крупные цифры, завершена — итоги ----------
 let map = null, routeLayer = null, refreshTimer = null;
+function makeMap(id) {
+  const m = L.map(id, { zoomControl: false });
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(m);
+  return [m, L.layerGroup().addTo(m)];
+}
+// Тёмная подложка: салатовая и белая линии читаются и на светлой карте.
+function drawLine(layer, latlngs, color) {
+  L.polyline(latlngs, { color: "#0E1116", weight: 8, opacity: 0.5 }).addTo(layer);
+  L.polyline(latlngs, { color, weight: 5 }).addTo(layer);
+}
+const dot = (layer, ll, fill, label, permanent) => L.circleMarker(ll, { radius: 7, color: "#0E1116", fillColor: fill, fillOpacity: 1, weight: 2 })
+  .bindTooltip(label, { permanent }).addTo(layer);
+
 async function showRide(id) {
   show("ride");
-  if (!map) {
-    map = L.map("map", { zoomControl: false });
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
-    routeLayer = L.layerGroup().addTo(map);
-  }
+  if (!map) [map, routeLayer] = makeMap("map");
   await renderRide(id, true);
   refreshTimer = setInterval(() => renderRide(id, false).catch(showError), 15000);
 }
@@ -450,14 +473,63 @@ async function renderRide(id, fitView) {
   routeLayer.clearLayers();
   if (!points.length) { map.setView([52.23, 21.01], 12); return; }
   const latlngs = points.map((p) => [p[0], p[1]]);
-  // Тёмная подложка: салатовая линия читается и на светлой карте.
-  L.polyline(latlngs, { color: "#0E1116", weight: 8, opacity: 0.5 }).addTo(routeLayer);
-  L.polyline(latlngs, { color: "#C6F432", weight: 5 }).addTo(routeLayer);
-  const dot = (ll, fill, label) => L.circleMarker(ll, { radius: 7, color: "#0E1116", fillColor: fill, fillOpacity: 1, weight: 2 }).bindTooltip(label).addTo(routeLayer);
-  dot(latlngs[0], "#FFFFFF", "Старт");
-  dot(latlngs[latlngs.length - 1], "#C6F432", ride.active ? "Сейчас" : "Финиш");
+  drawLine(routeLayer, latlngs, "#C6F432");
+  dot(routeLayer, latlngs[0], "#FFFFFF", "Старт");
+  dot(routeLayer, latlngs[latlngs.length - 1], "#C6F432", ride.active ? "Сейчас" : "Финиш");
   if (fitView) latlngs.length > 1 ? map.fitBounds(latlngs, { padding: [24, 24] }) : map.setView(latlngs[0], 15);
 }
+
+// ---------- совместная тренировка: одна карта на всех участников ----------
+const esc = (s) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`); // имена приходят из Telegram
+const COLORS = ["#FFFFFF", "#5EC8FF", "#FF8A5B", "#B98CFF", "#FFD23F"]; // ты — всегда салатовый
+let sessionMap = null, sessionLayer = null, sessionLink = null;
+
+async function showSession(id) {
+  show("session");
+  if (!sessionMap) [sessionMap, sessionLayer] = makeMap("session-map");
+  await renderSession(id, true);
+  refreshTimer = setInterval(() => renderSession(id, false).catch(showError), 15000);
+}
+
+async function renderSession(id, fitView) {
+  const data = await api(`/api/sessions/${id}`);
+  if (current !== "session") return;
+  sessionLink = data.link;
+  let other = 0;
+  const people = data.participants.map((p) => ({ ...p, color: p.you ? "#C6F432" : COLORS[other++ % COLORS.length] }));
+  const total = people.reduce((sum, p) => sum + (p.ride ? p.ride.distance_km : 0), 0);
+  $("session-people").innerHTML = `<h2>Вместе: ${total.toFixed(2)} км</h2>` + people.map((p) => `<div class="row">
+      <span class="swatch" style="background:${p.color}"></span>
+      <span class="grow">${esc(p.name)}${p.you ? " (ты)" : ""}${p.ride && p.ride.active ? '<span class="badge live">LIVE</span>' : ""}
+        <span class="meta">${p.ride ? `${KINDS[p.ride.kind]} · ${fmtDuration(p.ride.moving_s)} · ${speedOf(p.ride)}` : "ещё не начал(а) трансляцию"}</span></span>
+      <span class="km">${p.ride ? p.ride.distance_km : 0} км</span></div>`).join("");
+
+  sessionMap.invalidateSize();
+  sessionLayer.clearLayers();
+  const all = [];
+  for (const p of people.filter((p) => p.points.length)) {
+    drawLine(sessionLayer, p.points, p.color);
+    dot(sessionLayer, p.points[p.points.length - 1], p.color, esc(p.name), true);
+    all.push(...p.points);
+  }
+  if (!all.length) sessionMap.setView([52.23, 21.01], 12);
+  else if (fitView) all.length > 1 ? sessionMap.fitBounds(all, { padding: [32, 32] }) : sessionMap.setView(all[0], 15);
+}
+
+function invite() {
+  const text = "Тренируемся вместе: открой ссылку и запусти трансляцию геопозиции в чате с ботом.";
+  const url = `https://t.me/share/url?url=${encodeURIComponent(sessionLink)}&text=${encodeURIComponent(text)}`;
+  tg ? tg.openTelegramLink(url) : window.open(url);
+}
+$("invite").addEventListener("click", invite);
+$("together").addEventListener("click", async () => {
+  try {
+    if (tg) tg.HapticFeedback.impactOccurred("medium");
+    const s = me.session_id ? { id: me.session_id } : await post("/api/sessions");
+    await showSession(s.id);
+    if (!me.session_id) invite();
+  } catch (e) { showError(e); }
+});
 
 // Карточка приходит в чат с ботом; где Telegram умеет (Bot API 8.0+), сразу открывается выбор чата.
 let shareRideId = null;
@@ -508,6 +580,12 @@ if (tg) tg.MainButton.onClick(() => {
 (async () => {
   const rideParam = new URLSearchParams(location.search).get("ride");
   if (rideParam) return showRide(rideParam);
+  // Приглашение в совместную тренировку: t.me/<bot>?startapp=session_<token>.
+  const start = tg && tg.initDataUnsafe.start_param;
+  if (start && start.startsWith("session_")) {
+    await loadMe();
+    return showSession((await post(`/api/sessions/join/${encodeURIComponent(start.slice(8))}`)).id);
+  }
   await showHome();
   if (me.rides[0] && me.rides[0].active) return showRide(me.rides[0].id);
   if (!localStorage.getItem("onboarded") && !me.rides.length) onboarding(true);

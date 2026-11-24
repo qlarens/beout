@@ -23,6 +23,7 @@ import bot  # noqa: E402
 from auth import validate_init_data  # noqa: E402
 from cards import fit_route, render_card  # noqa: E402
 from stats import compute_stats, streaks  # noqa: E402
+from settings import SESSION_TTL_S  # noqa: E402
 from storage import SCHEMA, STALE_AFTER_S, Storage  # noqa: E402
 
 
@@ -199,8 +200,53 @@ class StorageTest(unittest.TestCase):
         self.assertIsNone(self.db.get_ride(mine))
         self.assertEqual(self.db.get_points(mine), [])
         self.assertEqual(self.db.consent_version(1), 0)
-        self.assertEqual(self.db.export_user(1), {"user": {"user_id": 1}, "rides": []})
+        self.assertEqual(self.db.export_user(1), {"user": {"user_id": 1}, "rides": [], "sessions": [], "rating_groups": []})
         self.assertEqual(len(self.db.get_points(other)), 10)
+
+    def test_delete_user_leaves_sessions_and_ratings(self):
+        session = self.db.create_session(1)
+        self.db.join_session(session["token"], 2)
+        self.db.set_group_member(-100, 1, True)
+        self.assertEqual(len(self.db.export_user(1)["sessions"]), 1)
+        self.assertEqual(self.db.export_user(1)["rating_groups"], [-100])
+        self.db.delete_user(1)
+        self.assertIsNone(self.db.current_session(2))  # сессию владельца не видно и участникам
+        self.assertEqual(self.db.groups_to_post("2026-W01"), [])
+
+    def test_session_links_rides(self):
+        now = 1_000_000.0
+        before = self.db.start_ride(1, 1, 1, now - 10)  # уже идёт — привяжется при создании
+        session = self.db.create_session(1, now)
+        self.assertEqual(self.db.get_ride(before)["session_id"], session["id"])
+        self.assertIsNone(self.db.join_session("wrong-token", 2, now))
+        self.assertIsNone(self.db.join_session(session["token"], 2, now + SESSION_TTL_S + 1))  # истекла
+        self.db.join_session(session["token"], 2, now + 60)
+        friend = self.db.start_ride(2, 2, 2, now + 120)
+        self.assertEqual(self.db.get_ride(friend)["session_id"], session["id"])
+        self.assertEqual(sorted(self.db.session_members(session["id"])), [1, 2])
+        later = self.db.start_ride(3, 3, 3, now + 120)  # не участник
+        self.assertIsNone(self.db.get_ride(later)["session_id"])
+        alone = self.db.start_ride(2, 2, 4, now + SESSION_TTL_S + 10)  # сессия истекла
+        self.assertIsNone(self.db.get_ride(alone)["session_id"])
+
+    def test_group_rating(self):
+        week = 1_000_000.0
+        for user_id, kind, km in ((1, "run", 5), (1, "run", 3), (2, "run", 10), (3, "run", 20), (1, "ride", 2)):
+            finished_ride(self.db, user_id, kind, week + user_id * 1000 + km * 10, km)
+        finished_ride(self.db, 1, "run", week - 86400, 50)  # прошлая неделя
+        self.db.set_group_member(-100, 1, True)
+        self.db.set_group_member(-100, 2, True)  # 3 не соглашался
+        self.db.set_group_member(-200, 3, True)
+        rating = self.db.group_rating(-100, week, week + 7 * 86400)
+        self.assertEqual(rating, {"run": [(2, 10.0), (1, 8.0)], "ride": [(1, 2.0)]})
+        self.db.set_group_member(-100, 2, False)
+        self.assertEqual(self.db.group_rating(-100, week, week + 7 * 86400)["run"], [(1, 8.0)])
+
+        self.assertEqual(sorted(self.db.groups_to_post("W1")), [-200, -100])
+        self.db.mark_posted(-100, "W1")
+        self.assertEqual(self.db.groups_to_post("W1"), [-200])
+        self.db.forget_group(-200)
+        self.assertEqual(self.db.groups_to_post("W2"), [-100])
 
     def test_export(self):
         self.db.set_consent(1, 1)
@@ -280,7 +326,18 @@ def fake_bot():
         send_photo=AsyncMock(return_value=SimpleNamespace(photo=[SimpleNamespace(file_id="small"), SimpleNamespace(file_id="big")])),
         save_prepared_inline_message=AsyncMock(return_value=SimpleNamespace(id="prep1")),
         me=AsyncMock(return_value=SimpleNamespace(username="beout_bot")),
+        get_chat=AsyncMock(side_effect=lambda user_id: SimpleNamespace(first_name=f"User{user_id}")),
+        get_chat_member=AsyncMock(side_effect=lambda chat_id, user_id: SimpleNamespace(
+            status="left" if user_id == 99 else "member", user=SimpleNamespace(full_name=f"User{user_id}"))),
     )
+
+
+def finished_ride(db, user_id, kind, t0, km, kmh=10):
+    ride_id = db.start_ride(user_id, user_id, int(t0), t0, kind=kind)
+    for ts, lat, lon in track((km, kmh)):
+        db.add_point(ride_id, t0 + ts, lat, lon)
+    db.finish_ride(ride_id, t0 + km * 3600 / kmh)
+    return ride_id
 
 
 class CardTest(unittest.TestCase):
@@ -403,6 +460,30 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call("DELETE", f"/api/rides/{ids[0]}", 1)).status, 200)
         self.assertIsNone(bot.db.get_ride(ids[0]))
 
+    async def test_session(self):
+        self.consent(1, 2, 3)
+        created = await (await self.call("POST", "/api/sessions", 1)).json()
+        self.assertTrue(created["link"].startswith("https://t.me/beout_bot?startapp=session_"))
+        token = created["link"].split("session_")[1]
+        self.assertEqual((await self.call("POST", "/api/sessions/join/nope", 2)).status, 404)
+        joined = await (await self.call("POST", f"/api/sessions/join/{token}", 2)).json()
+        self.assertEqual(joined["id"], created["id"])
+
+        ride_id = bot.db.start_ride(2, 2, 1, time.time(), kind="run")
+        for ts, lat, lon in line(5, time.time()):
+            bot.db.add_point(ride_id, ts, lat, lon)
+        path = f"/api/sessions/{created['id']}"
+        self.assertEqual((await self.call("GET", path, 3)).status, 404)  # не участник
+        data = await (await self.call("GET", path, 1)).json()
+        people = {p["name"]: p for p in data["participants"]}
+        self.assertEqual(set(people), {"User1", "User2"})
+        self.assertTrue(people["User1"]["you"])
+        self.assertIsNone(people["User1"]["ride"])
+        self.assertEqual(people["User2"]["ride"]["kind"], "run")
+        self.assertEqual(len(people["User2"]["points"]), 5)
+        self.assertNotIn("user_id", people["User2"])  # чужие id не отдаём
+        self.assertEqual((await (await self.call("GET", "/api/rides", 2)).json())["session_id"], created["id"])
+
     async def test_change_kind(self):
         self.consent(1, 2)
         ride_id = bot.db.start_ride(1, 1, 1, time.time())
@@ -475,6 +556,57 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         await bot.on_delete(self.callback("delete:yes"))
         self.assertIsNone(bot.db.get_ride(ride["id"]))
         self.assertFalse(bot.has_consent(1))
+
+    async def test_personal_commands_only_in_private_chat(self):
+        """/export в группе выложил бы личные данные всем участникам."""
+        personal = {h.callback for h in bot.private.message.handlers}
+        self.assertTrue({bot.cmd_start, bot.cmd_export, bot.cmd_delete, bot.on_location} <= personal)
+        self.assertFalse((await bot.private.message.check_root_filters(self.group_message()))[0])
+        self.assertTrue((await bot.private.message.check_root_filters(self.group_message("private")))[0])
+        self.assertFalse((await bot.private.edited_message.check_root_filters(self.group_message()))[0])
+
+    def group_message(self, chat_type="supergroup"):
+        return SimpleNamespace(chat=SimpleNamespace(id=-100, type=chat_type), bot=self.tg, answer=AsyncMock())
+
+    async def test_group_rating(self):
+        bot.db.set_consent(1, bot.POLICY_VERSION)
+        join = self.callback("rating:join")
+        join.message = SimpleNamespace(chat=SimpleNamespace(id=-100))
+        stranger = self.callback("rating:join")
+        stranger.from_user, stranger.message = SimpleNamespace(id=2), join.message
+        await bot.on_rating(stranger)  # не запускал бота — в рейтинг не попадает
+        self.assertIn("нажми «Старт»", stranger.answer.call_args.args[0])
+        await bot.on_rating(join)
+
+        week = bot.week_start(time.time())
+        finished_ride(bot.db, 1, "run", week + 60, 5)
+        bot.db.set_group_member(-100, 99, True)  # вышел из группы — не показываем
+        finished_ride(bot.db, 99, "run", week + 7000, 9)
+        msg = self.group_message()
+        await bot.cmd_top(msg)
+        text = msg.answer.call_args.args[0]
+        self.assertIn("Бег\n1. User1 — 5.0 км", text)
+        self.assertNotIn("User99", text)
+
+        private = self.group_message("private")
+        await bot.cmd_top(private)
+        self.assertIn("добавь меня в групповой чат", private.answer.call_args.args[0])
+
+    async def test_weekly_post(self):
+        monday = bot.week_start(time.time()) + 7 * 86400  # следующий понедельник, 00:00 UTC
+        bot.db.set_group_member(-100, 1, True)
+        bot.db.set_group_member(-200, 1, True)
+        def send(chat_id, *args, **kwargs):
+            if chat_id == -200:
+                raise bot.TelegramForbiddenError(method=None, message="kicked")
+        self.tg.send_message.side_effect = send
+        await bot.post_weekly_ratings(self.tg, monday + 3600)  # раньше часа автопоста
+        self.tg.send_message.assert_not_awaited()
+        await bot.post_weekly_ratings(self.tg, monday + bot.RATING_POST_HOUR_UTC * 3600)
+        await bot.post_weekly_ratings(self.tg, monday + bot.RATING_POST_HOUR_UTC * 3600 + 60)
+        self.assertEqual(self.tg.send_message.await_count, 2)  # раз в неделю в каждую группу
+        self.assertIn("Итоги недели", self.tg.send_message.call_args.args[1])
+        self.assertEqual(bot.db.groups_to_post("next"), [-100])  # откуда выгнали — забыта
 
     async def test_waits_out_flood_control(self):
         flood = bot.TelegramRetryAfter(method=None, message="Too Many Requests", retry_after=32)

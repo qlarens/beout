@@ -1,9 +1,10 @@
 """Хранилище на SQLite: пользователи, поездки, точки маршрута."""
+import secrets
 import sqlite3
 import time
 from pathlib import Path
 
-from settings import DEFAULT_ACTIVITY, DEFAULT_WEIGHT, MAX_ACCURACY_M, STALE_AFTER_S
+from settings import DEFAULT_ACTIVITY, DEFAULT_WEIGHT, MAX_ACCURACY_M, SESSION_TTL_S, STALE_AFTER_S
 from stats import compute_stats
 
 SCHEMA = """
@@ -30,6 +31,26 @@ CREATE TABLE IF NOT EXISTS points (
     accuracy REAL
 );
 CREATE INDEX IF NOT EXISTS points_by_ride ON points(ride_id, ts);
+CREATE TABLE IF NOT EXISTS sessions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    token      TEXT NOT NULL UNIQUE,  -- случайный: по ссылке с ним видны маршруты участников
+    owner_id   INTEGER NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS session_members (
+    session_id INTEGER NOT NULL,
+    user_id    INTEGER NOT NULL,
+    PRIMARY KEY (session_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS groups (
+    chat_id     INTEGER PRIMARY KEY,
+    posted_week TEXT  -- неделя последнего автопоста рейтинга, «2026-W48»
+);
+CREATE TABLE IF NOT EXISTS group_members (  -- согласились участвовать в рейтинге группы
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, user_id)
+);
 """
 
 STAT_KEYS = (
@@ -48,6 +69,7 @@ NEW_COLUMNS = {
     "rides": (
         *(f"{k} NUMERIC" for k in STAT_KEYS),  # заполняются при завершении тренировки
         f"kind TEXT NOT NULL DEFAULT '{DEFAULT_ACTIVITY}'",
+        "session_id INTEGER",  # совместная тренировка
     ),
 }
 
@@ -118,7 +140,7 @@ class Storage:
             )
 
     def delete_user(self, user_id):
-        """Удаляет всё о пользователе: точки, поездки, вес, согласие."""
+        """Удаляет всё о пользователе: точки, тренировки, вес, согласие, участие в сессиях и рейтингах."""
         with self.conn:
             self.conn.execute(
                 "DELETE FROM points WHERE ride_id IN (SELECT id FROM rides WHERE user_id = ?)",
@@ -126,6 +148,13 @@ class Storage:
             )
             self.conn.execute("DELETE FROM rides WHERE user_id = ?", (user_id,))
             self.conn.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+            self.conn.execute(
+                "DELETE FROM session_members WHERE user_id = ? "
+                "OR session_id IN (SELECT id FROM sessions WHERE owner_id = ?)",
+                (user_id, user_id),
+            )
+            self.conn.execute("DELETE FROM sessions WHERE owner_id = ?", (user_id,))
+            self.conn.execute("DELETE FROM group_members WHERE user_id = ?", (user_id,))
 
     def export_user(self, user_id):
         """Все данные пользователя одним словарём — для выгрузки по /export."""
@@ -142,6 +171,13 @@ class Storage:
                 )]}
                 for r in rides
             ],
+            "sessions": [dict(r) for r in self.conn.execute(
+                "SELECT s.id, s.owner_id, s.created_at FROM sessions s "
+                "JOIN session_members m ON m.session_id = s.id WHERE m.user_id = ?", (user_id,),
+            )],
+            "rating_groups": [r[0] for r in self.conn.execute(
+                "SELECT chat_id FROM group_members WHERE user_id = ?", (user_id,)
+            )],
         }
 
     # --- поездки ---
@@ -151,13 +187,113 @@ class Storage:
             "SELECT id FROM rides WHERE user_id = ? AND ended_at IS NULL", (user_id,)
         ).fetchall():
             self.finish_ride(old_id, ts)
+        session = self.current_session(user_id, ts)
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO rides(user_id, chat_id, message_id, started_at, live_until, kind) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (user_id, chat_id, message_id, ts, live_until, kind),
+                "INSERT INTO rides(user_id, chat_id, message_id, started_at, live_until, kind, session_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (user_id, chat_id, message_id, ts, live_until, kind, session and session["id"]),
             )
             return cur.lastrowid
+
+    # --- совместные тренировки ---
+    def create_session(self, owner_id, now=None):
+        now = now or time.time()
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO sessions(token, owner_id, created_at) VALUES (?, ?, ?)",
+                (secrets.token_urlsafe(12), owner_id, now),
+            )
+        return self.join_session(self.get_session(cur.lastrowid)["token"], owner_id, now)
+
+    def get_session(self, session_id):
+        return self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+
+    def join_session(self, token, user_id, now=None):
+        """Добавляет в сессию и привязывает идущую тренировку. None — нет такой или истекла."""
+        now = now or time.time()
+        session = self.conn.execute(
+            "SELECT * FROM sessions WHERE token = ? AND created_at > ?", (token, now - SESSION_TTL_S)
+        ).fetchone()
+        if session:
+            with self.conn:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO session_members(session_id, user_id) VALUES (?, ?)",
+                    (session["id"], user_id),
+                )
+                self.conn.execute(
+                    "UPDATE rides SET session_id = ? WHERE user_id = ? AND ended_at IS NULL",
+                    (session["id"], user_id),
+                )
+        return session
+
+    def current_session(self, user_id, now=None):
+        """Последняя неистёкшая сессия, в которой участвует пользователь."""
+        return self.conn.execute(
+            "SELECT s.* FROM sessions s JOIN session_members m ON m.session_id = s.id "
+            "WHERE m.user_id = ? AND s.created_at > ? ORDER BY s.created_at DESC LIMIT 1",
+            (user_id, (now or time.time()) - SESSION_TTL_S),
+        ).fetchone()
+
+    def is_member(self, session_id, user_id):
+        return self.conn.execute(
+            "SELECT 1 FROM session_members WHERE session_id = ? AND user_id = ?", (session_id, user_id)
+        ).fetchone() is not None
+
+    def session_members(self, session_id):
+        return [r[0] for r in self.conn.execute(
+            "SELECT user_id FROM session_members WHERE session_id = ?", (session_id,)
+        )]
+
+    def session_rides(self, session_id):
+        return self.conn.execute(
+            "SELECT * FROM rides WHERE session_id = ? ORDER BY started_at", (session_id,)
+        ).fetchall()
+
+    # --- рейтинги в группах ---
+    def add_group(self, chat_id):
+        with self.conn:
+            self.conn.execute("INSERT OR IGNORE INTO groups(chat_id) VALUES (?)", (chat_id,))
+
+    def forget_group(self, chat_id):
+        """Бота убрали из группы."""
+        with self.conn:
+            self.conn.execute("DELETE FROM group_members WHERE chat_id = ?", (chat_id,))
+            self.conn.execute("DELETE FROM groups WHERE chat_id = ?", (chat_id,))
+
+    def set_group_member(self, chat_id, user_id, member):
+        self.add_group(chat_id)
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO group_members(chat_id, user_id) VALUES (?, ?)" if member
+                else "DELETE FROM group_members WHERE chat_id = ? AND user_id = ?",
+                (chat_id, user_id),
+            )
+
+    def group_rating(self, chat_id, since, until):
+        """{kind: [(user_id, км)]} по убыванию — только согласившиеся участники группы."""
+        rating = {}
+        for r in self.conn.execute(
+            "SELECT r.kind, r.user_id, ROUND(SUM(r.distance_km), 1) AS km FROM rides r "
+            "JOIN group_members g ON g.user_id = r.user_id AND g.chat_id = ? "
+            "WHERE r.ended_at IS NOT NULL AND r.started_at >= ? AND r.started_at < ? "
+            "GROUP BY r.kind, r.user_id HAVING km > 0 ORDER BY km DESC",
+            (chat_id, since, until),
+        ):
+            rating.setdefault(r["kind"], []).append((r["user_id"], r["km"]))
+        return rating
+
+    def groups_to_post(self, week):
+        """Группы с участниками, куда рейтинг за прошлую неделю ещё не отправлен."""
+        return [r[0] for r in self.conn.execute(
+            "SELECT chat_id FROM groups WHERE COALESCE(posted_week, '') != ? "
+            "AND chat_id IN (SELECT chat_id FROM group_members)",
+            (week,),
+        )]
+
+    def mark_posted(self, chat_id, week):
+        with self.conn:
+            self.conn.execute("UPDATE groups SET posted_week = ? WHERE chat_id = ?", (week, chat_id))
 
     def find_ride_by_message(self, chat_id, message_id):
         return self.conn.execute(
