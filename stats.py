@@ -35,6 +35,7 @@ def compute_stats(points, weight_kg, kind=DEFAULT_ACTIVITY):
     slow_s = 0.0  # сколько секунд подряд медленнее pause_kmh
     # Накопленные дистанция (м) и время в движении (с) после каждого засчитанного отрезка.
     cum_d, cum_t = [0.0], [0.0]
+    track = [points[0][1:]] if points else []  # маршрут без выбросов GPS — для карты и карточки
 
     prev = points[0] if points else None
     for cur in points[1:]:
@@ -54,6 +55,7 @@ def compute_stats(points, weight_kg, kind=DEFAULT_ACTIVITY):
             prev = (t2, la1, lo1)
             continue
         prev = cur
+        track.append(cur[1:])
         slow_s = slow_s + dt if speed < limits["pause_kmh"] else 0.0
         if slow_s > AUTOPAUSE_AFTER_S:
             continue  # стоим
@@ -98,4 +100,20 @@ def compute_stats(points, weight_kg, kind=DEFAULT_ACTIVITY):
         "best_1k_s": best_effort(1000),
         "best_5k_s": best_effort(5000),
         "splits": [int(round(b - a)) for a, b in zip(km_marks, km_marks[1:])],  # секунды на каждый полный км
+        "track": track,  # [(lat, lon)]
     }
+
+
+# --- форматирование для сообщений бота и карточки ---
+
+def fmt_duration(seconds):
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def fmt_pace(speed_kmh):
+    """Темп «5:30 /км» из скорости; без движения — прочерк."""
+    if not speed_kmh:
+        return "–"
+    return f"{fmt_duration(round(3600 / speed_kmh))} /км"

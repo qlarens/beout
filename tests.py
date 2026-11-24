@@ -20,6 +20,7 @@ from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 
 import bot  # noqa: E402
 from auth import validate_init_data  # noqa: E402
+from cards import fit_route, render_card  # noqa: E402
 from stats import compute_stats  # noqa: E402
 from storage import SCHEMA, STALE_AFTER_S, Storage  # noqa: E402
 
@@ -232,10 +233,36 @@ class StorageTest(unittest.TestCase):
             copy.close()
 
 
+def fake_bot():
+    """Поддельный Bot: запоминает вызовы, отвечает как Telegram."""
+    return SimpleNamespace(
+        send_message=AsyncMock(),
+        send_photo=AsyncMock(return_value=SimpleNamespace(photo=[SimpleNamespace(file_id="small"), SimpleNamespace(file_id="big")])),
+        save_prepared_inline_message=AsyncMock(return_value=SimpleNamespace(id="prep1")),
+        me=AsyncMock(return_value=SimpleNamespace(username="beout_bot")),
+    )
+
+
+class CardTest(unittest.TestCase):
+    def test_card_is_png(self):
+        for points in ([], line(1), track((1.2, 10))):
+            png = render_card("run", compute_stats(points, 70, "run"), ["Новый рекорд: самая длинная"])
+            self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n")
+
+    def test_route_fits_box(self):
+        xy = fit_route([(52.0, 21.0), (52.01, 21.0), (52.01, 21.05)], (0, 0, 100, 200))
+        xs, ys = [x for x, _ in xy], [y for _, y in xy]
+        self.assertAlmostEqual(min(xs), 0)
+        self.assertAlmostEqual(max(xs), 100)  # шире, чем выше: упирается в ширину
+        self.assertTrue(all(0 <= y <= 200 for y in ys))
+        self.assertGreater(ys[0], ys[1])  # север — вверху
+        self.assertEqual(fit_route([(52.0, 21.0)], (0, 0, 100, 200)), [(50, 100)])
+
+
 class ApiTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         bot.db = Storage(":memory:")
-        self.tg = SimpleNamespace(send_message=AsyncMock())
+        self.tg = fake_bot()
         self.client = TestClient(TestServer(bot.make_web_app(self.tg)))
         await self.client.start_server()
 
@@ -282,6 +309,29 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call("POST", "/api/weight", 1, json={"weight": 70})).status, 200)
         self.assertEqual(bot.db.get_weight(1), 70)
 
+    async def test_share_card(self):
+        self.consent(1, 2)
+        ride_id = bot.db.start_ride(1, 1, 1, 0, kind="run")
+        for ts, lat, lon in track((1.5, 10)):
+            bot.db.add_point(ride_id, ts, lat, lon)
+        bot.db.finish_ride(ride_id)
+        self.assertEqual((await self.call("POST", f"/api/rides/{ride_id}/share", 2)).status, 404)
+
+        response = await self.call("POST", f"/api/rides/{ride_id}/share", 1)
+        self.assertEqual(await response.json(), {"prepared_id": "prep1"})
+        photo = self.tg.send_photo.call_args
+        self.assertEqual(photo.args[0], 1)
+        self.assertIn("Бег: 1.5 км", photo.kwargs["caption"])
+        button = photo.kwargs["reply_markup"].inline_keyboard[0][0]
+        self.assertEqual(button.url, "https://t.me/beout_bot?startapp")
+        prepared = self.tg.save_prepared_inline_message.call_args.kwargs
+        self.assertEqual(prepared["result"].photo_file_id, "big")  # самый крупный размер
+
+        # Telegram не принял prepared message — карточка всё равно в чате с ботом.
+        self.tg.save_prepared_inline_message.side_effect = bot.TelegramAPIError(method=None, message="nope")
+        response = await self.call("POST", f"/api/rides/{ride_id}/share", 1)
+        self.assertEqual(await response.json(), {"prepared_id": None})
+
     async def test_change_kind(self):
         self.consent(1, 2)
         ride_id = bot.db.start_ride(1, 1, 1, time.time())
@@ -318,7 +368,7 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         bot.db = Storage(":memory:")
         self.addCleanup(bot.db.conn.close)
-        self.tg = SimpleNamespace(send_message=AsyncMock())
+        self.tg = fake_bot()
 
     def location(self, live_period=900):
         return SimpleNamespace(
@@ -391,6 +441,13 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         await bot.on_finish(self.callback(f"finish:{ride['id']}"))
         self.assertIsNotNone(bot.db.get_ride(ride["id"])["ended_at"])
         self.assertEqual(self.tg.send_message.await_count, 1)  # итог — ровно один раз
+        summary = self.tg.send_message.call_args.kwargs["reply_markup"]
+        self.assertIn(f"share:{ride['id']}", [b.callback_data for row in summary.inline_keyboard for b in row])
+
+        await bot.on_share(stranger)
+        self.tg.send_photo.assert_not_awaited()  # чужую карточку не получить
+        await bot.on_share(self.callback(f"share:{ride['id']}"))
+        self.tg.send_photo.assert_awaited_once()
 
 
 if __name__ == "__main__":

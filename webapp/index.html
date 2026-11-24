@@ -158,6 +158,10 @@
   <div id="ride-live"></div>
   <div id="map"></div>
   <div class="grid" id="ride-stats"></div>
+  <div id="ride-actions" class="hidden">
+    <p></p>
+    <button class="primary wide" id="share"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13v7h16v-7M12 3v12M7 8l5-5 5 5"/></svg>Поделиться карточкой</button>
+  </div>
   <div id="splits"></div>
   <p class="hint" id="ride-hint"></p>
 </section>
@@ -381,6 +385,8 @@ async function renderRide(id, fitView) {
       <div class="num">${fmtDuration(ride.moving_s)}</div><div class="label">в движении</div>
       <div class="pair"><div><div class="num">${ride.distance_km}</div><div class="label">км</div></div>
         <div><div class="num">${fast[0]}</div><div class="label">${fast[1]}</div></div></div></div>` : "";
+  $("ride-actions").classList.toggle("hidden", ride.active);
+  shareRideId = ride.id;
   $("ride-stats").innerHTML = ride.active ? "" :
     tile(ride.distance_km, "км") + tile(fmtDuration(ride.moving_s), "в движении") + tile(fmtDuration(ride.duration_s), "всего") +
     tile(fast[0], fast[1]) + tile(fast[2], fast[3]) + tile(`≈ ${ride.kcal}`, "ккал");
@@ -403,6 +409,19 @@ async function renderRide(id, fitView) {
   dot(latlngs[latlngs.length - 1], "#C6F432", ride.active ? "Сейчас" : "Финиш");
   if (fitView) latlngs.length > 1 ? map.fitBounds(latlngs, { padding: [24, 24] }) : map.setView(latlngs[0], 15);
 }
+
+// Карточка приходит в чат с ботом; где Telegram умеет (Bot API 8.0+), сразу открывается выбор чата.
+let shareRideId = null;
+$("share").addEventListener("click", async () => {
+  if (tg) tg.HapticFeedback.impactOccurred("light");
+  $("share").disabled = true;
+  try {
+    const { prepared_id } = await post(`/api/rides/${shareRideId}/share`);
+    if (prepared_id && tg && tg.isVersionAtLeast("8.0")) tg.shareMessage(prepared_id, (sent) => sent && haptic("success"));
+    else if (tg) tg.showAlert("Карточка в чате с ботом — перешли её друзьям.");
+  } catch (e) { showError(e); }
+  $("share").disabled = false;
+});
 
 function stopRefresh() {
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }

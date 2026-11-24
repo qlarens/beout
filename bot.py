@@ -22,6 +22,7 @@ from aiogram.types import (
     ErrorEvent,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InlineQueryResultCachedPhoto,
     MenuButtonWebApp,
     Message,
     WebAppInfo,
@@ -29,7 +30,8 @@ from aiogram.types import (
 from aiohttp import web
 
 from auth import validate_init_data
-from stats import compute_stats
+from cards import render_card
+from stats import compute_stats, fmt_duration, fmt_pace
 from settings import ACTIVITIES, APP_NAME
 from storage import STAT_KEYS, Storage
 
@@ -88,22 +90,8 @@ def to_ts(value):
     return float(value)
 
 
-def fmt_duration(seconds):
-    h, rem = divmod(int(seconds), 3600)
-    m, s = divmod(rem, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
-
-
 def has_consent(user_id):
     return db.consent_version(user_id) >= POLICY_VERSION
-
-
-def fmt_pace(speed_kmh):
-    """Темп «5:30 /км» из скорости; без движения — прочерк."""
-    if not speed_kmh:
-        return "–"
-    m, s = divmod(int(round(3600 / speed_kmh)), 60)
-    return f"{m}:{s:02d} /км"
 
 
 def stats_of(ride):
@@ -178,7 +166,7 @@ def ride_summary(ride):
 
 
 async def finish_and_report(bot, ride_id, ts=None):
-    """Закрывает поездку и присылает итог — только если её не закрыли раньше."""
+    """Закрывает тренировку и присылает итог — только если её не закрыли раньше."""
     if not db.finish_ride(ride_id, ts):
         return
     ride = db.get_ride(ride_id)
@@ -186,8 +174,29 @@ async def finish_and_report(bot, ride_id, ts=None):
         ride["chat_id"],
         ride_summary(ride),
         parse_mode="HTML",
-        reply_markup=open_app_keyboard(ride["id"], "🗺 Маршрут на карте"),
+        reply_markup=open_app_keyboard(
+            ride["id"], "🗺 Маршрут на карте",
+            [InlineKeyboardButton(text="📤 Карточка для друзей", callback_data=f"share:{ride['id']}")],
+        ),
     )
+
+
+async def send_card(bot, ride):
+    """Шлёт карточку тренировки в чат с владельцем. Возвращает (сообщение, подпись, кнопки)."""
+    stats = compute_stats(db.get_points(ride["id"]), db.get_weight(ride["user_id"]), ride["kind"])
+    png = await asyncio.to_thread(render_card, ride["kind"], stats)
+    caption = (
+        f"{ACTIVITIES[ride['kind']]['title']}: {stats['distance_km']} км "
+        f"за {fmt_duration(stats['moving_s'])} · {speed_line(ride, stats)}\n{APP_NAME}"
+    )
+    # web_app-кнопки работают только в личке с ботом, а карточку пересылают в любые чаты — нужна ссылка.
+    # Без Main Mini App в @BotFather ссылка просто откроет чат с ботом.
+    link = f"https://t.me/{(await bot.me()).username}?startapp"
+    markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть трекер", url=link)]])
+    message = await bot.send_photo(
+        ride["chat_id"], BufferedInputFile(png, filename="beout.png"), caption=caption, reply_markup=markup
+    )
+    return message, caption, markup
 
 
 _last_alert = 0.0
@@ -324,6 +333,16 @@ async def on_kind(callback: CallbackQuery):
     await callback.answer(ACTIVITIES[kind]["title"])
 
 
+@dp.callback_query(F.data.regexp(r"^share:\d+$"))
+async def on_share(callback: CallbackQuery):
+    ride = db.get_ride(int(callback.data.split(":")[1]))
+    if not ride or ride["user_id"] != callback.from_user.id:
+        await callback.answer("Тренировка не найдена")
+        return
+    await callback.answer()
+    await send_card(callback.bot, ride)
+
+
 @dp.callback_query(F.data.regexp(r"^finish:\d+$"))
 async def on_finish(callback: CallbackQuery):
     ride = db.get_ride(int(callback.data.split(":")[1]))
@@ -447,11 +466,10 @@ def own_ride(request):
 
 async def api_ride(request):
     ride = own_ride(request)
-    points = db.get_points(ride["id"])
-    splits = compute_stats(points, db.get_weight(ride["user_id"]), ride["kind"])["splits"]
+    stats = compute_stats(db.get_points(ride["id"]), db.get_weight(ride["user_id"]), ride["kind"])
     return web.json_response({
-        "ride": {**ride_to_json(ride), "splits": splits},
-        "points": [[lat, lon, ts] for ts, lat, lon in points],
+        "ride": {**ride_to_json(ride), "splits": stats["splits"]},
+        "points": stats["track"],  # [[lat, lon]] без выбросов GPS
     })
 
 
@@ -483,6 +501,26 @@ async def api_finish(request):
     ride = own_ride(request)
     await finish_and_report(request.app[BOT_KEY], ride["id"])
     return web.json_response({"ride": ride_to_json(db.get_ride(ride["id"]))})
+
+
+async def api_share(request):
+    """Карточка уходит в чат с ботом, а Mini App получает id для shareMessage — отправить в любой чат."""
+    ride = own_ride(request)
+    bot = request.app[BOT_KEY]
+    message, caption, markup = await send_card(bot, ride)
+    try:
+        prepared = await bot.save_prepared_inline_message(
+            user_id=ride["user_id"],
+            result=InlineQueryResultCachedPhoto(
+                id=f"ride{ride['id']}", photo_file_id=message.photo[-1].file_id,
+                caption=caption, reply_markup=markup,
+            ),
+            allow_user_chats=True, allow_bot_chats=True, allow_group_chats=True, allow_channel_chats=True,
+        )
+    except TelegramAPIError as e:  # карточка всё равно в чате с ботом — её можно переслать
+        logging.warning("savePreparedInlineMessage: %r", e)
+        return web.json_response({"prepared_id": None})
+    return web.json_response({"prepared_id": prepared.id})
 
 
 async def api_set_weight(request):
@@ -518,6 +556,7 @@ def make_web_app(bot):
     app.router.add_get("/api/rides/{ride_id:\\d+}", api_ride)
     app.router.add_post("/api/rides/{ride_id:\\d+}/finish", api_finish)
     app.router.add_post("/api/rides/{ride_id:\\d+}/kind", api_ride_kind)
+    app.router.add_post("/api/rides/{ride_id:\\d+}/share", api_share)
     app.router.add_post("/api/weight", api_set_weight)
     app.router.add_post("/api/kind", api_set_kind)
     return app
