@@ -1,0 +1,24 @@
+[Unit]
+Description=Be. Out! Telegram bot and Mini App server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=beout
+Group=beout
+WorkingDirectory=/srv/beout/data
+EnvironmentFile=/etc/beout/beout.env
+Environment=PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ExecStart=/srv/beout/venv/bin/python /srv/beout/current/bot.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/beout/data
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

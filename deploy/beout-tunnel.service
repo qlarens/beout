@@ -1,0 +1,21 @@
+[Unit]
+Description=Cloudflare tunnel for beout.lilaxy.com
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=beout
+Group=beout
+# TUNNEL_ID: id именованного туннеля, на который указывает CNAME beout.lilaxy.com
+EnvironmentFile=/etc/beout/tunnel.env
+ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate --credentials-file /etc/beout/tunnel.json --url http://127.0.0.1:8090 run ${TUNNEL_ID}
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

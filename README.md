@@ -36,6 +36,19 @@ python bot.py
 | `ADMIN_CHAT_ID` | твой Telegram ID: сюда бот пишет о запуске и ошибках |
 | `DEV_USER_ID` | отключает проверку подписи — только для локальной отладки, не на публичном сервере |
 
+## Прод (VDS)
+
+Бот работает на VDS под systemd: `beout` (бот, `127.0.0.1:8090`) и `beout-tunnel` (Cloudflare-туннель на `https://beout.lilaxy.com`).
+
+- Код: `/srv/beout/releases/<sha>`, активный релиз — ссылка `/srv/beout/current`, venv — `/srv/beout/venv`.
+- База и бэкапы: `/srv/beout/data` (только пользователь `beout`).
+- Секреты: `/etc/beout/beout.env` (`BOT_TOKEN`, `WEBAPP_URL`, `HOST`, `PORT=8090`, `DB_PATH`, `ADMIN_CHAT_ID`), `/etc/beout/tunnel.env` (`TUNNEL_ID`), `/etc/beout/tunnel.json`.
+- Логи: `journalctl -u beout -u beout-tunnel`.
+
+**CD:** каждый push в `master` после зелёных тестов выкладывается сам ([ci.yml](.github/workflows/ci.yml)): `git archive | ssh beout-deploy@VDS <sha>`. Ключ `beout-deploy` умеет только запускать [deploy/beout-deploy](deploy/beout-deploy), который переключает релиз и откатывает его, если бот не поднялся. Секреты репозитория: `DEPLOY_HOST`, `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS`.
+
+Новый сервер: `sudo bash deploy/setup-vds.sh "<публичный ключ деплоя>"`, затем положить секреты и базу. `deploy/setup-vds.sh` не обновляется через CD: поменял юниты или `beout-deploy` — запусти его снова.
+
 ## Данные пользователей
 
 Бот ничего не записывает, пока пользователь не примет условия ([webapp/privacy.html](webapp/privacy.html)).
