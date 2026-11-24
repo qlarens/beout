@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
@@ -31,7 +31,7 @@ from aiohttp import web
 
 from auth import validate_init_data
 from cards import render_card
-from stats import compute_stats, fmt_duration, fmt_pace
+from stats import compute_stats, fmt_duration, fmt_pace, streaks
 from settings import ACTIVITIES, APP_NAME
 from storage import STAT_KEYS, Storage
 
@@ -162,7 +162,20 @@ def ride_summary(ride):
         f"(в движении {fmt_duration(stats['moving_s'])})\n"
         f"⚡ {speed_line(ride, stats)}\n"
         f"🔥 Калории: ≈ <b>{stats['kcal']} ккал</b>"
+        + "".join(f"\n🏆 {label}" for label in record_labels(ride))
     )
+
+
+RECORD_TITLES = {
+    "distance_km": "самая длинная тренировка",
+    "max_speed_kmh": "максимальная скорость",
+    "best_1k_s": "лучший 1 км",
+    "best_5k_s": "лучшие 5 км",
+}
+
+
+def record_labels(ride):
+    return [f"Новый рекорд: {RECORD_TITLES[key]}" for key in db.new_records(ride)]
 
 
 async def finish_and_report(bot, ride_id, ts=None):
@@ -184,7 +197,7 @@ async def finish_and_report(bot, ride_id, ts=None):
 async def send_card(bot, ride):
     """Шлёт карточку тренировки в чат с владельцем. Возвращает (сообщение, подпись, кнопки)."""
     stats = compute_stats(db.get_points(ride["id"]), db.get_weight(ride["user_id"]), ride["kind"])
-    png = await asyncio.to_thread(render_card, ride["kind"], stats)
+    png = await asyncio.to_thread(render_card, ride["kind"], stats, record_labels(ride))
     caption = (
         f"{ACTIVITIES[ride['kind']]['title']}: {stats['distance_km']} км "
         f"за {fmt_duration(stats['moving_s'])} · {speed_line(ride, stats)}\n{APP_NAME}"
@@ -445,13 +458,44 @@ async def api_rides(request):
         before = float(request.query["before"]) if "before" in request.query else None
     except ValueError:
         raise web.HTTPBadRequest(text="before должен быть числом")
-    rides = [ride_to_json(r) for r in db.list_rides(user_id, PAGE_SIZE, before)]
+    kind = request.query.get("kind")
+    if kind is not None and kind not in ACTIVITIES:
+        raise web.HTTPBadRequest(text=f"kind: одно из {', '.join(ACTIVITIES)}")
+    rides = [ride_to_json(r) for r in db.list_rides(user_id, PAGE_SIZE, before, kind)]
     return web.json_response({
         "weight": db.get_weight(user_id),
         "kind": db.get_kind(user_id),
         "rides": rides,
         "has_more": len(rides) == PAGE_SIZE,
-        "totals": db.totals(user_id),
+    })
+
+
+def local_date(ts, tz):
+    """Дата у пользователя; tz — смещение в минутах, как Date.getTimezoneOffset() (UTC − местное)."""
+    return datetime.fromtimestamp(ts - tz * 60, timezone.utc).date()
+
+
+async def api_summary(request):
+    """Итоги недели и месяца по типам, серии и личные рекорды."""
+    user_id = current_user_id(request)
+    try:
+        tz = int(request.query.get("tz", "0"))
+        if not -840 <= tz <= 840:
+            raise ValueError
+    except ValueError:
+        raise web.HTTPBadRequest(text="tz — смещение в минутах, как getTimezoneOffset()")
+
+    def start_of(day):  # полночь по времени пользователя, unix time
+        return datetime(day.year, day.month, day.day, tzinfo=timezone.utc).timestamp() + tz * 60
+
+    today = local_date(time.time(), tz)
+    days, weeks = streaks((local_date(ts, tz) for ts in db.finished_starts(user_id)), today)
+    return web.json_response({
+        "week": db.totals_by_kind(user_id, start_of(today - timedelta(days=today.weekday()))),
+        "month": db.totals_by_kind(user_id, start_of(today.replace(day=1))),
+        "streak_days": days,
+        "streak_weeks": weeks,
+        "records": {kind: db.best_values(user_id, kind) for kind in ACTIVITIES},
     })
 
 
@@ -468,9 +512,14 @@ async def api_ride(request):
     ride = own_ride(request)
     stats = compute_stats(db.get_points(ride["id"]), db.get_weight(ride["user_id"]), ride["kind"])
     return web.json_response({
-        "ride": {**ride_to_json(ride), "splits": stats["splits"]},
+        "ride": {**ride_to_json(ride), "splits": stats["splits"], "records": db.new_records(ride)},
         "points": stats["track"],  # [[lat, lon]] без выбросов GPS
     })
+
+
+async def api_delete_ride(request):
+    db.delete_ride(own_ride(request)["id"])
+    return web.json_response({"deleted": True})
 
 
 async def read_kind(request):
@@ -554,6 +603,8 @@ def make_web_app(bot):
     app.router.add_static("/assets", ASSETS_DIR)  # шрифты и логотип для Mini App
     app.router.add_get("/api/rides", api_rides)
     app.router.add_get("/api/rides/{ride_id:\\d+}", api_ride)
+    app.router.add_delete("/api/rides/{ride_id:\\d+}", api_delete_ride)
+    app.router.add_get("/api/summary", api_summary)
     app.router.add_post("/api/rides/{ride_id:\\d+}/finish", api_finish)
     app.router.add_post("/api/rides/{ride_id:\\d+}/kind", api_ride_kind)
     app.router.add_post("/api/rides/{ride_id:\\d+}/share", api_share)

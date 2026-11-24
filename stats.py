@@ -1,6 +1,7 @@
 """Подсчёт статистики тренировки: дистанция, время, скорость, темп, сплиты, калории."""
 import math
 from bisect import bisect_left
+from datetime import timedelta
 
 from settings import ACTIVITIES, AUTOPAUSE_AFTER_S, DEFAULT_ACTIVITY, MIN_MOVE_M, SMOOTH_SEGMENTS
 
@@ -102,6 +103,28 @@ def compute_stats(points, weight_kg, kind=DEFAULT_ACTIVITY):
         "splits": [int(round(b - a)) for a, b in zip(km_marks, km_marks[1:])],  # секунды на каждый полный км
         "track": track,  # [(lat, lon)]
     }
+
+
+def streaks(days, today):
+    """Серии: (дней подряд, недель подряд) с тренировками.
+
+    days — даты тренировок. Если сегодня (на этой неделе) тренировки ещё не было,
+    серия не прервана и считается со вчера (с прошлой недели).
+    """
+    def run(units, cur, step):
+        if cur not in units:
+            cur -= step
+        n = 0
+        while cur in units:
+            n, cur = n + 1, cur - step
+        return n
+
+    days = set(days)
+    weeks = {d - timedelta(days=d.weekday()) for d in days}  # понедельники
+    return (
+        run(days, today, timedelta(days=1)),
+        run(weeks, today - timedelta(days=today.weekday()), timedelta(weeks=1)),
+    )
 
 
 # --- форматирование для сообщений бота и карточки ---

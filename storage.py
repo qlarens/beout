@@ -36,6 +36,12 @@ STAT_KEYS = (
     "distance_km", "duration_s", "moving_s", "avg_speed_kmh", "max_speed_kmh", "kcal",
     "best_1k_s", "best_5k_s",
 )
+# Личные рекорды по типам: (колонка, что лучше). Лучшие 1/5 км — только для бега.
+RECORDS = {
+    "ride": (("distance_km", max), ("max_speed_kmh", max)),
+    "run": (("distance_km", max), ("best_1k_s", min), ("best_5k_s", min)),
+    "walk": (("distance_km", max),),
+}
 # Колонки, появившиеся после первой версии: в старую базу они добавляются при запуске.
 NEW_COLUMNS = {
     "users": ("consent_at REAL", "consent_version INTEGER NOT NULL DEFAULT 0", "kind TEXT"),
@@ -213,23 +219,59 @@ class Storage:
             "SELECT * FROM rides WHERE id = ?", (ride_id,)
         ).fetchone()
 
-    def list_rides(self, user_id, limit=50, before=None):
-        """Поездки от новых к старым; before — started_at последней показанной."""
+    def list_rides(self, user_id, limit=50, before=None, kind=None):
+        """Тренировки от новых к старым; before — started_at последней показанной, kind — фильтр."""
         return self.conn.execute(
-            "SELECT * FROM rides WHERE user_id = ? AND started_at < ? "
+            "SELECT * FROM rides WHERE user_id = ? AND started_at < ? AND kind = COALESCE(?, kind) "
             "ORDER BY started_at DESC LIMIT ?",
-            (user_id, before if before is not None else 1e18, limit),
+            (user_id, before if before is not None else 1e18, kind, limit),
         ).fetchall()
 
-    def totals(self, user_id):
-        """Итоги по всем завершённым поездкам."""
+    def delete_ride(self, ride_id):
+        with self.conn:
+            self.conn.execute("DELETE FROM points WHERE ride_id = ?", (ride_id,))
+            self.conn.execute("DELETE FROM rides WHERE id = ?", (ride_id,))
+
+    def totals_by_kind(self, user_id, since=0):
+        """Итоги завершённых тренировок, начатых не раньше since: {kind: {count, distance_km, moving_s}}."""
+        rows = self.conn.execute(
+            "SELECT kind, COUNT(*) AS count, ROUND(SUM(distance_km), 1) AS distance_km, "
+            "SUM(moving_s) AS moving_s FROM rides "
+            "WHERE user_id = ? AND ended_at IS NOT NULL AND started_at >= ? GROUP BY kind",
+            (user_id, since),
+        ).fetchall()
+        return {r["kind"]: {k: r[k] for k in ("count", "distance_km", "moving_s")} for r in rows}
+
+    def finished_starts(self, user_id):
+        """Время начала всех завершённых тренировок — для серий."""
+        return [r[0] for r in self.conn.execute(
+            "SELECT started_at FROM rides WHERE user_id = ? AND ended_at IS NOT NULL", (user_id,)
+        )]
+
+    def best_values(self, user_id, kind, before=1e18):
+        """Лучшие значения рекордных метрик среди завершённых тренировок типа kind, начатых до before.
+
+        None — если таких тренировок не было.
+        """
+        cols = ", ".join(f"{'MAX' if better is max else 'MIN'}({key}) AS {key}" for key, better in RECORDS[kind])
         row = self.conn.execute(
-            "SELECT COUNT(ended_at) AS count, ROUND(COALESCE(SUM(distance_km), 0), 1) AS distance_km, "
-            "COALESCE(SUM(moving_s), 0) AS moving_s, COALESCE(SUM(kcal), 0) AS kcal "
-            "FROM rides WHERE user_id = ?",
-            (user_id,),
+            f"SELECT COUNT(*) AS n, {cols} FROM rides "
+            "WHERE user_id = ? AND kind = ? AND ended_at IS NOT NULL AND started_at < ?",
+            (user_id, kind, before),
         ).fetchone()
-        return dict(row)
+        return {key: row[key] for key, _ in RECORDS[kind]} if row["n"] else None
+
+    def new_records(self, ride):
+        """Какие личные рекорды поставила завершённая тренировка (первая тренировка типа — не рекорд)."""
+        if ride["ended_at"] is None:
+            return []
+        prev = self.best_values(ride["user_id"], ride["kind"], before=ride["started_at"])
+        if prev is None:
+            return []
+        return [
+            key for key, better in RECORDS[ride["kind"]]
+            if ride[key] and (prev[key] is None or (ride[key] != prev[key] and better(ride[key], prev[key]) == ride[key]))
+        ]
 
     # --- точки ---
     def add_point(self, ride_id, ts, lat, lon, accuracy=None):

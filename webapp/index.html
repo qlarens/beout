@@ -114,6 +114,10 @@
   nav button { flex: 1; flex-direction: column; gap: 2px; background: none; color: var(--hint); font-size: 11px; padding: 4px; }
   nav button[aria-current="page"] { color: var(--ink); }
 
+  .record { display: flex; align-items: center; gap: 8px; color: var(--ink); font-weight: 600; margin: -8px 0 12px; }
+  .rec-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--card); }
+  .rec-row b { font-family: "Inter Display", "Inter", sans-serif; }
+
   .sheet { position: fixed; inset: 0; background: var(--bg); padding: 24px 16px; overflow: auto; z-index: 1000; }
 </style>
 </head>
@@ -126,12 +130,16 @@
   <button class="primary wide" id="start">Начать тренировку</button>
   <h2>Последняя тренировка</h2>
   <div id="last-ride"></div>
-  <h2>Всего</h2>
-  <div class="grid" id="totals"></div>
+  <p class="hint" id="streak"></p>
+  <h2>Эта неделя</h2>
+  <div id="week"></div>
+  <h2>Этот месяц</h2>
+  <div id="month"></div>
 </section>
 
 <section id="history" data-tab class="hidden">
   <h1>История</h1>
+  <div class="chips" id="history-kinds" role="group" aria-label="Фильтр по типу"></div>
   <div id="rides"></div>
   <button class="wide hidden" id="more">Показать ещё</button>
 </section>
@@ -147,6 +155,8 @@
   <p class="hint">Нужен для оценки калорий по методу MET: это примерная оценка, а не медицинский расчёт.</p>
   <h2>Тип по умолчанию</h2>
   <div class="chips" id="profile-kinds" role="group" aria-label="Тип по умолчанию"></div>
+  <h2>Личные рекорды</h2>
+  <div id="records"></div>
   <h2>Мои данные</h2>
   <p class="hint">Выгрузить все данные — /export, удалить всё — /delete в чате с ботом.<br>
     <a href="/privacy" id="privacy-link">Условия и политика конфиденциальности</a></p>
@@ -155,6 +165,7 @@
 <section id="ride" class="hidden">
   <div class="chips" id="ride-kinds" role="group" aria-label="Тип тренировки"></div>
   <h1 id="ride-title"></h1>
+  <div id="ride-records"></div>
   <div id="ride-live"></div>
   <div id="map"></div>
   <div class="grid" id="ride-stats"></div>
@@ -164,6 +175,7 @@
   </div>
   <div id="splits"></div>
   <p class="hint" id="ride-hint"></p>
+  <button class="wide danger hidden" id="delete"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/></svg>Удалить тренировку</button>
 </section>
 
 <div class="error hidden" id="error" role="alert"></div>
@@ -197,7 +209,20 @@ const ICONS = {
   live: '<circle cx="12" cy="12" r="2"/><path d="M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   play: '<path d="M7 4.5v15L19 12z"/>',
+  trophy: '<path d="M8 4h8v5a4 4 0 0 1-8 0zM8 6H4.5a3.5 3.5 0 0 0 3.8 4M16 6h3.5a3.5 3.5 0 0 1-3.8 4M12 13v4M8 21h8M9.5 17h5"/>',
 };
+// Личные рекорды: подпись и формат значения.
+const RECORDS = {
+  distance_km: ["Самая длинная", (v) => `${v} км`],
+  max_speed_kmh: ["Максимальная скорость", (v) => `${v} км/ч`],
+  best_1k_s: ["Лучший 1 км", fmtDuration],
+  best_5k_s: ["Лучшие 5 км", fmtDuration],
+};
+function plural(n, one, few, many) {
+  const m10 = n % 10, m100 = n % 100;
+  return `${n} ${m10 === 1 && m100 !== 11 ? one : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? few : many}`;
+}
+const confirmDialog = (text) => tg ? new Promise((ok) => tg.showConfirm(text, ok)) : Promise.resolve(confirm(text));
 const icon = (name) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
 const KINDS = { ride: "Велосипед", run: "Бег", walk: "Ходьба" };
 
@@ -244,9 +269,10 @@ const tile = (value, label) => `<div class="tile"><b>${value}</b><span>${label}<
 // Велосипед — скорость, бег и ходьба — темп.
 const speedOf = (r) => r.kind === "ride" ? `${r.avg_speed_kmh} км/ч` : `${fmtPace(r.avg_speed_kmh)} /км`;
 
-function kindChips(el, selected, onPick) {
-  el.innerHTML = Object.entries(KINDS).map(([k, title]) =>
-    `<button data-kind="${k}" aria-pressed="${k === selected}">${icon(k)}${title}</button>`).join("");
+function kindChips(el, selected, onPick, all) {
+  const options = all ? { "": "Все", ...KINDS } : KINDS;
+  el.innerHTML = Object.entries(options).map(([k, title]) =>
+    `<button data-kind="${k}" aria-pressed="${k === selected}">${k ? icon(k) : ""}${title}</button>`).join("");
   el.onclick = (e) => {
     const b = e.target.closest("button");
     if (!b || b.getAttribute("aria-pressed") === "true") return;
@@ -294,15 +320,28 @@ document.addEventListener("click", (e) => {
 
 const pickDefaultKind = (then) => async (kind) => { await post("/api/kind", { kind }); await then(); };
 
+// Итоги недели/месяца по времени телефона: сервер не знает часовой пояс.
+const summary = () => api(`/api/summary?tz=${new Date().getTimezoneOffset()}`);
+
+function periodHtml(totals) {
+  const kinds = Object.keys(KINDS).filter((k) => totals[k]);
+  return kinds.length ? kinds.map((k) => `<div class="row">${icon(k)}
+    <span class="grow">${KINDS[k]}<span class="meta">${plural(totals[k].count, "тренировка", "тренировки", "тренировок")} · ${fmtDuration(totals[k].moving_s)}</span></span>
+    <span class="km">${totals[k].distance_km} км</span></div>`).join("") : '<p class="hint">Пока ничего.</p>';
+}
+
 async function showHome() {
   show("home");
-  await loadMe();
+  const [, sum] = await Promise.all([loadMe(), summary()]);
   const last = me.rides[0];
   $("active-card").innerHTML = last && last.active ? rideRow(last) : "";
   $("last-ride").innerHTML = !last ? '<p class="hint">Пока пусто — самое время начать.</p>' : last.active ? "" : rideRow(last);
   kindChips($("home-kinds"), me.kind, pickDefaultKind(showHome));
-  const t = me.totals;
-  $("totals").innerHTML = tile(t.distance_km, "км") + tile(fmtDuration(t.moving_s), "в движении") + tile(`≈ ${t.kcal}`, "ккал");
+  $("streak").textContent = sum.streak_days || sum.streak_weeks
+    ? `Серия: ${plural(sum.streak_days, "день", "дня", "дней")} · ${plural(sum.streak_weeks, "неделя", "недели", "недель")} подряд`
+    : "";
+  $("week").innerHTML = periodHtml(sum.week);
+  $("month").innerHTML = periodHtml(sum.month);
 }
 
 // ---------- онбординг: при первом запуске и по кнопке «Начать» ----------
@@ -322,7 +361,8 @@ $("onb-close").addEventListener("click", () => onboarding(false));
 $("onb-go").addEventListener("click", () => { onboarding(false); if (tg) tg.close(); });
 
 // ---------- история ----------
-let lastStartedAt = null;
+let lastStartedAt = null, historyKind = "";
+const ridesUrl = (before) => `/api/rides?${new URLSearchParams({ ...(historyKind && { kind: historyKind }), ...(before && { before }) })}`;
 function appendRides(data, reset) {
   const html = data.rides.map(rideRow).join("");
   if (reset) $("rides").innerHTML = html || '<p class="hint">Тренировок пока нет.</p>';
@@ -332,18 +372,23 @@ function appendRides(data, reset) {
 }
 async function showHistory() {
   show("history");
-  appendRides(await loadMe(), true);
+  kindChips($("history-kinds"), historyKind, async (kind) => { historyKind = kind; await showHistory(); }, true);
+  appendRides(await api(ridesUrl()), true);
 }
 $("more").addEventListener("click", async () => {
-  try { appendRides(await api(`/api/rides?before=${lastStartedAt}`), false); } catch (e) { showError(e); }
+  try { appendRides(await api(ridesUrl(lastStartedAt)), false); } catch (e) { showError(e); }
 });
 
 // ---------- профиль ----------
 async function showProfile() {
   show("profile");
-  await loadMe();
+  const [, sum] = await Promise.all([loadMe(), summary()]);
   $("weight").value = me.weight;
   kindChips($("profile-kinds"), me.kind, pickDefaultKind(showProfile));
+  $("records").innerHTML = Object.keys(KINDS).filter((k) => sum.records[k]).map((k) =>
+    `<p class="hint">${KINDS[k]}</p>` + Object.entries(sum.records[k]).filter(([, v]) => v).map(([key, v]) =>
+      `<div class="rec-row"><span>${RECORDS[key][0]}</span><b>${RECORDS[key][1](v)}</b></div>`).join("")
+  ).join("") || '<p class="hint">Появятся после первых тренировок.</p>';
 }
 $("save-weight").addEventListener("click", async () => {
   try { await post("/api/weight", { weight: Number($("weight").value) }); haptic("success"); } catch (e) { showError(e); }
@@ -386,7 +431,11 @@ async function renderRide(id, fitView) {
       <div class="pair"><div><div class="num">${ride.distance_km}</div><div class="label">км</div></div>
         <div><div class="num">${fast[0]}</div><div class="label">${fast[1]}</div></div></div></div>` : "";
   $("ride-actions").classList.toggle("hidden", ride.active);
+  $("delete").classList.toggle("hidden", ride.active);
   shareRideId = ride.id;
+  $("ride-records").innerHTML = ride.records.map((key) =>
+    `<div class="record">${icon("trophy")}Новый рекорд: ${RECORDS[key][0].toLowerCase()}</div>`).join("");
+  if (fitView && ride.records.length) haptic("success");
   $("ride-stats").innerHTML = ride.active ? "" :
     tile(ride.distance_km, "км") + tile(fmtDuration(ride.moving_s), "в движении") + tile(fmtDuration(ride.duration_s), "всего") +
     tile(fast[0], fast[1]) + tile(fast[2], fast[3]) + tile(`≈ ${ride.kcal}`, "ккал");
@@ -421,6 +470,15 @@ $("share").addEventListener("click", async () => {
     else if (tg) tg.showAlert("Карточка в чате с ботом — перешли её друзьям.");
   } catch (e) { showError(e); }
   $("share").disabled = false;
+});
+
+$("delete").addEventListener("click", async () => {
+  if (!(await confirmDialog("Удалить тренировку? Отменить это нельзя."))) return;
+  try {
+    await api(`/api/rides/${shareRideId}`, { method: "DELETE" });
+    haptic("warning");
+    await showHistory();
+  } catch (e) { showError(e); }
 });
 
 function stopRefresh() {

@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -21,7 +22,7 @@ from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 import bot  # noqa: E402
 from auth import validate_init_data  # noqa: E402
 from cards import fit_route, render_card  # noqa: E402
-from stats import compute_stats  # noqa: E402
+from stats import compute_stats, streaks  # noqa: E402
 from storage import SCHEMA, STALE_AFTER_S, Storage  # noqa: E402
 
 
@@ -112,6 +113,17 @@ class StatsTest(unittest.TestCase):
         self.assertAlmostEqual(compute_stats(fast, 75, "ride")["distance_km"], 1.0, places=1)
         self.assertEqual(compute_stats(fast, 75, "run")["distance_km"], 0)  # для бега это скачки GPS
 
+    def test_streaks(self):
+        today = date(2026, 11, 25)  # среда
+        ago = lambda *days: [today - timedelta(days=d) for d in days]  # noqa: E731
+        self.assertEqual(streaks([], today), (0, 0))
+        self.assertEqual(streaks(ago(0, 1, 2), today), (3, 1))  # пн–ср одной недели
+        self.assertEqual(streaks(ago(0, 1, 2, 4), today), (3, 2))  # 4 дня назад — суббота прошлой недели
+        self.assertEqual(streaks(ago(1, 2), today), (2, 1))  # сегодня ещё не тренировался — серия жива
+        self.assertEqual(streaks(ago(2, 3), today), (0, 2))  # вчера пропустил — дни прервались, недели нет
+        self.assertEqual(streaks(ago(7, 14), today), (0, 2))  # на этой неделе ещё нет — считаем с прошлой
+        self.assertEqual(streaks(ago(0, 14), today), (1, 1))  # прошлая неделя пропущена
+
     def test_same_track_as_ride_and_run(self):
         points = track((3, 10))  # 3 км по 10 км/ч
         ride, run = compute_stats(points, 70, "ride"), compute_stats(points, 70, "run")
@@ -200,10 +212,38 @@ class StorageTest(unittest.TestCase):
 
     def test_totals_count_finished_only(self):
         self.db.finish_ride(self.ride(1, line(10, 0)))
+        self.db.finish_ride(self.ride(1, line(10, 500)))
         self.ride(1, line(10, 1000))  # идёт сейчас
-        totals = self.db.totals(1)
-        self.assertEqual(totals["count"], 1)
-        self.assertAlmostEqual(totals["distance_km"], 0.5, places=1)
+        totals = self.db.totals_by_kind(1)
+        self.assertEqual(list(totals), ["ride"])
+        self.assertEqual(totals["ride"]["count"], 2)
+        self.assertAlmostEqual(totals["ride"]["distance_km"], 1.0, places=1)
+        self.assertEqual(self.db.totals_by_kind(1, since=400)["ride"]["count"], 1)
+
+    def test_records(self):
+        def finished(points, kind="run"):
+            ride_id = self.ride(1, points)
+            self.db.set_ride_kind(ride_id, kind)
+            self.db.finish_ride(ride_id, points[-1][0])
+            return self.db.get_ride(ride_id)
+
+        def shifted(t0, *legs):
+            return [(t0 + ts, lat, lon) for ts, lat, lon in track(*legs)]
+
+        self.assertEqual(self.db.new_records(finished(shifted(0, (2, 10)))), [])  # первая — не рекорд
+        self.assertEqual(self.db.new_records(finished(shifted(10_000, (3, 12)))), ["distance_km", "best_1k_s"])
+        self.assertEqual(self.db.new_records(finished(shifted(20_000, (1, 9)))), [])
+        self.assertEqual(self.db.new_records(finished(shifted(30_000, (1, 20)), "ride")), [])  # другой тип
+        best = self.db.best_values(1, "run")
+        self.assertEqual((best["distance_km"], best["best_1k_s"], best["best_5k_s"]), (3.0, 300, None))
+        self.assertIsNone(self.db.best_values(1, "walk"))
+
+    def test_delete_ride(self):
+        mine, other = self.ride(1), self.ride(1, line(10, 5000))
+        self.db.delete_ride(mine)
+        self.assertIsNone(self.db.get_ride(mine))
+        self.assertEqual(self.db.get_points(mine), [])
+        self.assertEqual(len(self.db.get_points(other)), 10)
 
     def test_migrates_old_database(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -331,6 +371,37 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.tg.save_prepared_inline_message.side_effect = bot.TelegramAPIError(method=None, message="nope")
         response = await self.call("POST", f"/api/rides/{ride_id}/share", 1)
         self.assertEqual(await response.json(), {"prepared_id": None})
+
+    async def test_history_filter_summary_delete(self):
+        self.consent(1, 2)
+        now = time.time()
+        ids = {}
+        for kind, days_ago in (("run", 0), ("ride", 1), ("run", 40)):
+            t0 = now - days_ago * 86400 - 3600
+            ids[days_ago] = bot.db.start_ride(1, 1, days_ago, t0, kind=kind)
+            for ts, lat, lon in track((1, 10)):
+                bot.db.add_point(ids[days_ago], t0 + ts, lat, lon)
+            bot.db.finish_ride(ids[days_ago], t0 + 400)
+
+        runs = await (await self.call("GET", "/api/rides?kind=run", 1)).json()
+        self.assertEqual([r["kind"] for r in runs["rides"]], ["run", "run"])
+        self.assertEqual((await self.call("GET", "/api/rides?kind=swim", 1)).status, 400)
+
+        tz = -60  # Варшава зимой: getTimezoneOffset() = -60
+        summary = await (await self.call("GET", f"/api/summary?tz={tz}", 1)).json()
+        self.assertEqual(summary["month"]["run"]["count"], 1)  # 40 дней назад — прошлый месяц
+        self.assertGreaterEqual(summary["streak_days"], 1)
+        self.assertEqual(summary["records"]["run"]["distance_km"], 1.0)
+        self.assertIsNone(summary["records"]["walk"])
+        self.assertEqual((await self.call("GET", "/api/summary?tz=9999", 1)).status, 400)
+
+        detail = await (await self.call("GET", f"/api/rides/{ids[0]}", 1)).json()
+        self.assertEqual(detail["ride"]["records"], [])  # та же дистанция — не рекорд
+        self.assertEqual(len(detail["ride"]["splits"]), 1)
+
+        self.assertEqual((await self.call("DELETE", f"/api/rides/{ids[0]}", 2)).status, 404)
+        self.assertEqual((await self.call("DELETE", f"/api/rides/{ids[0]}", 1)).status, 200)
+        self.assertIsNone(bot.db.get_ride(ids[0]))
 
     async def test_change_kind(self):
         self.consent(1, 2)
