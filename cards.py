@@ -115,18 +115,19 @@ def render_card(kind, stats, records=(), tiles=None):
         draw_map(img, 200, stats["track"], tiles)
 
     d = ImageDraw.Draw(img)
-    columns = [
+    cells = [  # 2×2: «1:02:13» крупным шрифтом в четыре колонки не влезает
         (f"{stats['distance_km']:.2f}", "км"),
         (fmt_duration(stats["moving_s"]), "в движении"),
         pace_or_speed(kind, stats["avg_speed_kmh"]),
+        (f"{stats['kcal']}", "ккал"),
     ]
-    col_w = (W - 2 * PAD) / len(columns)
-    for i, (value, label) in enumerate(columns):
-        x = PAD + i * col_w
-        d.text((x * S, 1010 * S), value, font=font("InterDisplay-Bold.ttf", 80), fill=WHITE, anchor="ls")
-        d.text((x * S, 1060 * S), label, font=font("Inter-Regular.ttf", 32), fill=MUTED, anchor="ls")
+    col_w = (W - 2 * PAD) / 2
+    for i, (value, label) in enumerate(cells):
+        x, y = PAD + i % 2 * col_w, 940 + i // 2 * 155
+        d.text((x * S, y * S), value, font=font("InterDisplay-Bold.ttf", 80), fill=WHITE, anchor="ls")
+        d.text((x * S, (y + 46) * S), label, font=font("Inter-Regular.ttf", 32), fill=MUTED, anchor="ls")
     for i, text in enumerate(records[:3]):
-        d.text((PAD * S, (1150 + i * 52) * S), text, font=font("Inter-Regular.ttf", 36), fill=LIME, anchor="ls")
+        d.text((PAD * S, (1222 + i * 46) * S), text, font=font("Inter-Regular.ttf", 36), fill=LIME, anchor="ls")
     return png(img, H)
 
 
