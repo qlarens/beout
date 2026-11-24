@@ -1,4 +1,4 @@
-"""Подсчёт статистики тренировки: дистанция, время, скорость, темп, сплиты, калории."""
+"""Подсчёт статистики тренировки: дистанция, время, скорость, сплиты, калории."""
 import math
 from bisect import bisect_left
 from datetime import timedelta
@@ -156,9 +156,3 @@ def fmt_duration(seconds):
     m, s = divmod(rem, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
-
-def fmt_pace(speed_kmh):
-    """Темп «5:30 /км» из скорости; без движения — прочерк."""
-    if not speed_kmh:
-        return "–"
-    return f"{fmt_duration(round(3600 / speed_kmh))} /км"

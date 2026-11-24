@@ -138,7 +138,7 @@ class StatsTest(unittest.TestCase):
         points = track((3, 10))  # 3 км по 10 км/ч
         ride, run = compute_stats(points, 70, "ride"), compute_stats(points, 70, "run")
         self.assertEqual((ride["distance_km"], ride["avg_speed_kmh"]), (3.0, 10.0))
-        self.assertEqual(bot.fmt_pace(run["avg_speed_kmh"]), "6:00 /км")
+        self.assertEqual(run["avg_speed_kmh"], 10.0)
         self.assertEqual(run["splits"], [360, 360, 360])
         self.assertEqual(run["kcal"], round(9.8 * 70 * 0.3))  # MET бега 9.8 на 10 км/ч, 18 минут
         self.assertEqual(ride["kcal"], round(4.0 * 70 * 0.3))  # MET вело 4.0
@@ -155,7 +155,6 @@ class StatsTest(unittest.TestCase):
         t, lat, lon = points[10]
         points[10] = (t, lat + 70 / M_PER_DEG, lon)  # один отрезок ~45 км/ч, следующий ~0
         self.assertLess(compute_stats(points, 70, "ride")["max_speed_kmh"], 26)
-        self.assertEqual(bot.fmt_pace(0), "–")
 
 
 class StorageTest(unittest.TestCase):

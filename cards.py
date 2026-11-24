@@ -7,7 +7,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from settings import ACTIVITIES, APP_NAME, MAP_MAX_ZOOM
-from stats import fmt_duration, fmt_pace
+from stats import fmt_duration
 
 ASSETS = Path(__file__).parent / "assets"
 BG, LIME, WHITE, MUTED = "#0E1116", "#C6F432", "#FFFFFF", "#B7BDC7"
@@ -100,13 +100,6 @@ def header(img, top, right_text):
     d.text(((W - PAD) * S, (top + 36) * S), right_text, font=font("Inter-Regular.ttf", 36), fill=MUTED, anchor="rm")
 
 
-def pace_or_speed(kind, speed_kmh):
-    """Велосипед — скорость, бег и ходьба — темп: (значение, подпись)."""
-    if kind == "ride":
-        return f"{speed_kmh}", "км/ч"
-    return fmt_pace(speed_kmh).removesuffix(" /км"), "темп /км"
-
-
 def png(img, height):
     out = io.BytesIO()
     img.resize((W, height), Image.LANCZOS).save(out, "PNG", optimize=True)
@@ -125,7 +118,7 @@ def render_card(kind, stats, records=(), tiles=None):
     cells = [  # 2×2: «1:02:13» крупным шрифтом в четыре колонки не влезает
         (f"{stats['distance_km']:.2f}", "км"),
         (fmt_duration(stats["moving_s"]), "в движении"),
-        pace_or_speed(kind, stats["avg_speed_kmh"]),
+        (f"{stats['avg_speed_kmh']}", "км/ч"),
         (f"{stats['kcal']}", "ккал"),
     ]
     col_w = (W - 2 * PAD) / 2
@@ -171,13 +164,11 @@ def render_story(kind, stats, records=(), tiles=None, elevation_m=None, date="")
     d.text((PAD * S + d.textlength(value, font=big) + 24 * S, 1190 * S), "км",
            font=font("InterDisplay-Bold.ttf", 72), fill=LIME, anchor="ls")
 
-    pace = kind != "ride"
     best = (fmt_duration(stats["best_1k_s"]), "лучший 1 км") if kind == "run" and stats["best_1k_s"] else None
     cells = [
         (fmt_duration(stats["moving_s"]), "в движении"),
-        pace_or_speed(kind, stats["avg_speed_kmh"]) if pace else (f"{stats['avg_speed_kmh']}", "км/ч средняя"),
-        (fmt_pace(stats["max_speed_kmh"]).removesuffix(" /км"), "лучший темп") if pace
-        else (f"{stats['max_speed_kmh']}", "км/ч макс."),
+        (f"{stats['avg_speed_kmh']}", "км/ч средняя"),
+        (f"{stats['max_speed_kmh']}", "км/ч макс."),
         (f"{stats['kcal']}", "ккал"),
         (f"{elevation_m} м" if elevation_m is not None else "–", "набор высоты"),
         best or (fmt_duration(stats["duration_s"]), "всего"),

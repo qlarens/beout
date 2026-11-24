@@ -38,7 +38,7 @@ from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
 from auth import validate_init_data
 from cards import map_view, render_card, render_story
-from stats import compute_stats, elevation_gain, fmt_duration, fmt_pace, streaks
+from stats import compute_stats, elevation_gain, fmt_duration, streaks
 from settings import (
     ACTIVITIES,
     APP_NAME,
@@ -130,11 +130,8 @@ def stats_of(ride):
     return compute_stats(db.get_points(ride["id"]), db.get_weight(ride["user_id"]), ride["kind"])
 
 
-def speed_line(ride, stats):
-    """Велосипед — скорость, бег и ходьба — темп."""
-    if ride["kind"] == "ride":
-        return f"Средняя: {stats['avg_speed_kmh']} км/ч, макс: {stats['max_speed_kmh']} км/ч"
-    return f"Темп: {fmt_pace(stats['avg_speed_kmh'])}, лучший: {fmt_pace(stats['max_speed_kmh'])}"
+def speed_line(stats):
+    return f"Средняя: {stats['avg_speed_kmh']} км/ч, макс: {stats['max_speed_kmh']} км/ч"
 
 
 def start_keyboard(ride):
@@ -189,7 +186,7 @@ def ride_summary(ride):
         f"📏 Дистанция: <b>{stats['distance_km']} км</b>\n"
         f"⏱ Время: {fmt_duration(stats['duration_s'])} "
         f"(в движении {fmt_duration(stats['moving_s'])})\n"
-        f"⚡ {speed_line(ride, stats)}\n"
+        f"⚡ {speed_line(stats)}\n"
         f"🔥 Калории: ≈ <b>{stats['kcal']} ккал</b>"
         + (f"\n⛰ Набор высоты: {ride['elevation_gain_m']} м" if ride["elevation_gain_m"] is not None else "")
         + "".join(f"\n🏆 {label}" for label in record_labels(ride))
@@ -299,7 +296,7 @@ async def send_card(bot, ride):
     png = await asyncio.to_thread(render_card, ride["kind"], stats, record_labels(ride), tiles)
     caption = (
         f"{ACTIVITIES[ride['kind']]['title']}: {stats['distance_km']} км "
-        f"за {fmt_duration(stats['moving_s'])} · {speed_line(ride, stats)}\n{APP_NAME}"
+        f"за {fmt_duration(stats['moving_s'])} · {speed_line(stats)}\n{APP_NAME}"
     )
     # web_app-кнопки работают только в личке с ботом, а карточку пересылают в любые чаты — нужна ссылка.
     # Без Main Mini App в @BotFather ссылка просто откроет чат с ботом.

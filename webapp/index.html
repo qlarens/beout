@@ -287,13 +287,11 @@ function fmtDuration(s) {
   const pad = (n) => String(n).padStart(2, "0");
   return h ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
 }
-const fmtPace = (kmh) => (kmh ? fmtDuration(Math.round(3600 / kmh)) : "–");
 function fmtDate(ts) {
   return new Date(ts * 1000).toLocaleString("ru-RU", { day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" });
 }
 const tile = (value, label) => `<div class="tile"><b>${value}</b><span>${label}</span></div>`;
-// Велосипед — скорость, бег и ходьба — темп.
-const speedOf = (r) => r.kind === "ride" ? `${r.avg_speed_kmh} км/ч` : `${fmtPace(r.avg_speed_kmh)} /км`;
+const speedOf = (r) => `${r.avg_speed_kmh} км/ч`;
 
 function kindChips(el, selected, onPick, all) {
   const options = all ? { "": "Все", ...KINDS } : KINDS;
@@ -486,9 +484,7 @@ async function renderRide(id, fitView) {
     await renderRide(id, false);
   });
   $("ride-title").innerHTML = fmtDate(ride.started_at) + (ride.active ? '<span class="badge live">LIVE</span>' : "");
-  const fast = ride.kind === "ride"
-    ? [`${ride.avg_speed_kmh}`, "ср. км/ч", `${ride.max_speed_kmh}`, "макс. км/ч"]
-    : [fmtPace(ride.avg_speed_kmh), "темп /км", fmtPace(ride.max_speed_kmh), "лучший /км"];
+  const fast = [`${ride.avg_speed_kmh}`, "ср. км/ч", `${ride.max_speed_kmh}`, "макс. км/ч"];
 
   $("map").classList.toggle("small", ride.active);
   $("ride-live").innerHTML = ride.active ? `<div class="big">
