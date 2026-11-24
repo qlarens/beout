@@ -4,6 +4,7 @@ import sqlite3
 import time
 from pathlib import Path
 
+from i18n import DEFAULT_LANG
 from settings import DEFAULT_ACTIVITY, DEFAULT_WEIGHT, MAX_ACCURACY_M, SESSION_TTL_S, STALE_AFTER_S
 from stats import compute_stats
 
@@ -73,7 +74,11 @@ NEW_COLUMNS = {
     "users": (
         "consent_at REAL", "consent_version INTEGER NOT NULL DEFAULT 0", "kind TEXT",
         "sos_token TEXT",  # из ссылки-приглашения экстренного контакта
+        "lang TEXT",  # язык, выбранный в профиле; NULL — как в Telegram
+        "tg_lang TEXT",  # язык Telegram (ru/uk/en) — для сообщений без апдейта: итог по таймеру, SOS
     ),
+    "groups": ("lang TEXT",),  # язык того, кто вызвал /top, — для автопоста рейтинга
+    "sos_contacts": ("lang TEXT",),  # язык контакта, когда он согласился: SOS придёт на нём
     "rides": (
         *(f"{k} NUMERIC" for k in STAT_KEYS),  # заполняются при завершении тренировки
         f"kind TEXT NOT NULL DEFAULT '{DEFAULT_ACTIVITY}'",
@@ -131,6 +136,27 @@ class Storage:
 
     def set_kind(self, user_id, kind):
         self._set_user(user_id, "kind", kind)
+
+    def lang_choice(self, user_id):
+        """Язык, выбранный в профиле; None — автоматически."""
+        row = self.conn.execute("SELECT lang FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return row and row["lang"]
+
+    def set_lang(self, user_id, lang):
+        self._set_user(user_id, "lang", lang)
+
+    def user_lang(self, user_id):
+        """Язык сообщений: выбранный в профиле, иначе язык Telegram, иначе английский."""
+        row = self.conn.execute("SELECT lang, tg_lang FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return (row and (row["lang"] or row["tg_lang"])) or DEFAULT_LANG
+
+    def remember_tg_lang(self, user_id, lang):
+        """Язык Telegram — только тех, кто принял условия: без согласия ничего не храним."""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE users SET tg_lang = ? WHERE user_id = ? AND consent_version > 0 AND tg_lang IS NOT ?",
+                (lang, user_id, lang),
+            )
 
     def consent_version(self, user_id):
         """Версия условий, которую принял пользователь; 0 — не принимал."""
@@ -191,8 +217,8 @@ class Storage:
                 "SELECT chat_id FROM group_members WHERE user_id = ?", (user_id,)
             )],
             "sos_contacts": self.sos_contacts(user_id),
-            "sos_contact_for": [r[0] for r in self.conn.execute(
-                "SELECT user_id FROM sos_contacts WHERE contact_id = ?", (user_id,)
+            "sos_contact_for": [dict(r) for r in self.conn.execute(
+                "SELECT user_id, lang FROM sos_contacts WHERE contact_id = ?", (user_id,)
             )],
         }
 
@@ -214,13 +240,27 @@ class Storage:
         row = self.conn.execute("SELECT user_id FROM users WHERE sos_token = ?", (token,)).fetchone()
         return row and row["user_id"]
 
-    def set_sos_contact(self, user_id, contact_id, on):
+    def set_sos_contact(self, user_id, contact_id, on, lang=None):
         with self.conn:
-            self.conn.execute(
-                "INSERT OR IGNORE INTO sos_contacts(user_id, contact_id) VALUES (?, ?)" if on
-                else "DELETE FROM sos_contacts WHERE user_id = ? AND contact_id = ?",
-                (user_id, contact_id),
-            )
+            if on:
+                self.conn.execute(
+                    "INSERT INTO sos_contacts(user_id, contact_id, lang) VALUES (?, ?, ?) "
+                    "ON CONFLICT(user_id, contact_id) DO UPDATE SET lang = excluded.lang",
+                    (user_id, contact_id, lang),
+                )
+            else:
+                self.conn.execute(
+                    "DELETE FROM sos_contacts WHERE user_id = ? AND contact_id = ?", (user_id, contact_id)
+                )
+
+    def contact_lang(self, user_id, contact_id):
+        """Язык SOS для контакта: его язык в боте, иначе запомненный, когда он стал контактом."""
+        row = self.conn.execute(
+            "SELECT COALESCE(u.lang, u.tg_lang, c.lang) FROM sos_contacts c "
+            "LEFT JOIN users u ON u.user_id = c.contact_id WHERE c.user_id = ? AND c.contact_id = ?",
+            (user_id, contact_id),
+        ).fetchone()
+        return (row and row[0]) or DEFAULT_LANG
 
     def sos_contacts(self, user_id):
         return [r[0] for r in self.conn.execute(
@@ -314,9 +354,15 @@ class Storage:
         ).fetchall()
 
     # --- рейтинги в группах ---
-    def add_group(self, chat_id):
+    def add_group(self, chat_id, lang=None):
         with self.conn:
             self.conn.execute("INSERT OR IGNORE INTO groups(chat_id) VALUES (?)", (chat_id,))
+            if lang:
+                self.conn.execute("UPDATE groups SET lang = ? WHERE chat_id = ?", (lang, chat_id))
+
+    def group_lang(self, chat_id):
+        row = self.conn.execute("SELECT lang FROM groups WHERE chat_id = ?", (chat_id,)).fetchone()
+        return (row and row["lang"]) or DEFAULT_LANG
 
     def forget_group(self, chat_id):
         """Бота убрали из группы."""

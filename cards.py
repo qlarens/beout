@@ -6,7 +6,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-from settings import ACTIVITIES, APP_NAME, CARD_WATERMARK, MAP_MAX_ZOOM
+from i18n import DEFAULT_LANG, t
+from settings import APP_NAME, MAP_MAX_ZOOM
 from stats import fmt_duration
 
 ASSETS = Path(__file__).parent / "assets"
@@ -64,7 +65,7 @@ def rounded(size, radius):
     return mask
 
 
-def draw_map(img, top, track, tiles):
+def draw_map(img, top, track, tiles, lang):
     """Тёмная карта со скруглёнными углами (без плиток — просто фон) и маршрут поверх. track не пуст."""
     z, scale, left, wtop, keys = map_view(track)
     panel, drawn = Image.new("L", (math.ceil(MAP_W / scale), math.ceil(MAP_H / scale)), 0), False
@@ -88,16 +89,16 @@ def draw_map(img, top, track, tiles):
     for (x, y), fill in ((xy[0], WHITE), (xy[-1], LIME)):
         d.ellipse((x - r, y - r, x + r, y + r), fill=fill, outline=BG, width=6 * S)
     if drawn:  # лицензия OSM требует подпись
-        d.text(((PAD + MAP_W - 20) * S, (top + MAP_H - 16) * S), "© участники OpenStreetMap",
+        d.text(((PAD + MAP_W - 20) * S, (top + MAP_H - 16) * S), t(lang, "osm"),
                font=font("Inter-Regular.ttf", 20), fill=MUTED, anchor="rs")
 
 
-def header(img, top, right_text):
+def header(img, top, right_text, lang):
     d = ImageDraw.Draw(img)
     logo = Image.open(ASSETS / "brand" / "duet-512.png").resize((96 * S, 96 * S), Image.LANCZOS)
     img.paste(logo, ((PAD - 12) * S, (top - 12) * S), rounded(logo.size, 24))  # у логотипа свой тёмный фон
     d.text(((PAD + 96) * S, (top + 40) * S), APP_NAME, font=font("InterDisplay-Bold.ttf", 44), fill=WHITE, anchor="ls")
-    d.text(((PAD + 96) * S, (top + 76) * S), CARD_WATERMARK, font=font("Inter-Regular.ttf", 26), fill=MUTED, anchor="ls")
+    d.text(((PAD + 96) * S, (top + 76) * S), t(lang, "watermark"), font=font("Inter-Regular.ttf", 26), fill=MUTED, anchor="ls")
     d.text(((W - PAD) * S, (top + 36) * S), right_text, font=font("Inter-Regular.ttf", 36), fill=MUTED, anchor="rm")
 
 
@@ -107,20 +108,20 @@ def png(img, height):
     return out.getvalue()
 
 
-def render_card(kind, stats, records=(), tiles=None):
+def render_card(kind, stats, records=(), tiles=None, lang=DEFAULT_LANG):
     """PNG карточки для чатов. stats — из compute_stats (нужен track), records — подписи новых рекордов,
     tiles — {(z, x, y): PNG} для map_view(track), None — без карты."""
     img = Image.new("RGB", (W * S, H * S), BG)
-    header(img, PAD, ACTIVITIES[kind]["title"])
+    header(img, PAD, t(lang, f"kind_{kind}"), lang)
     if stats["track"]:
-        draw_map(img, 200, stats["track"], tiles)
+        draw_map(img, 200, stats["track"], tiles, lang)
 
     d = ImageDraw.Draw(img)
     cells = [  # 2×2: «1:02:13» крупным шрифтом в четыре колонки не влезает
-        (f"{stats['distance_km']:.2f}", "км"),
-        (fmt_duration(stats["moving_s"]), "в движении"),
-        (f"{stats['avg_speed_kmh']}", "км/ч"),
-        (f"{stats['kcal']}", "ккал"),
+        (f"{stats['distance_km']:.2f}", t(lang, "card_km")),
+        (fmt_duration(stats["moving_s"]), t(lang, "card_moving")),
+        (f"{stats['avg_speed_kmh']}", t(lang, "card_kmh")),
+        (f"{stats['kcal']}", t(lang, "card_kcal")),
     ]
     col_w = (W - 2 * PAD) / 2
     for i, (value, label) in enumerate(cells):
@@ -150,32 +151,33 @@ def aurora(width, height):
     return img
 
 
-def render_story(kind, stats, records=(), tiles=None, elevation_m=None, date=""):
+def render_story(kind, stats, records=(), tiles=None, elevation_m=None, date="", lang=DEFAULT_LANG):
     """PNG 1080×1920 для Instagram Stories: градиент, карта, дистанция крупно и подробные цифры.
     Важное — между 200 и 1700 px по высоте: сверху и снизу Instagram кладёт свои кнопки."""
     img = aurora(W, STORY_H).resize((W * S, STORY_H * S), Image.BICUBIC)
-    header(img, 200, f"{ACTIVITIES[kind]['title']} · {date}" if date else ACTIVITIES[kind]["title"])
+    title = t(lang, f"kind_{kind}")
+    header(img, 200, f"{title} · {date}" if date else title, lang)
     if stats["track"]:
-        draw_map(img, 330, stats["track"], tiles)
+        draw_map(img, 330, stats["track"], tiles, lang)
 
     d = ImageDraw.Draw(img)
     value = f"{stats['distance_km']:.2f}"
     big = font("InterDisplay-Bold.ttf", 200)
     d.text((PAD * S, 1190 * S), value, font=big, fill=WHITE, anchor="ls")
-    d.text((PAD * S + d.textlength(value, font=big) + 24 * S, 1190 * S), "км",
+    d.text((PAD * S + d.textlength(value, font=big) + 24 * S, 1190 * S), t(lang, "card_km"),
            font=font("InterDisplay-Bold.ttf", 72), fill=LIME, anchor="ls")
 
     cells = [
-        (fmt_duration(stats["moving_s"]), "в движении"),
-        (f"{stats['avg_speed_kmh']}", "км/ч средняя"),
-        (f"{stats['max_speed_kmh']}", "км/ч макс."),
-        (f"{stats['kcal']}", "ккал"),
+        (fmt_duration(stats["moving_s"]), t(lang, "card_moving")),
+        (f"{stats['avg_speed_kmh']}", t(lang, "card_avg")),
+        (f"{stats['max_speed_kmh']}", t(lang, "card_max")),
+        (f"{stats['kcal']}", t(lang, "card_kcal")),
     ]
     if elevation_m:  # не узнали или по ровному — не показываем
-        cells.append((f"{elevation_m} м", "набор высоты"))
+        cells.append((t(lang, "card_meters", m=elevation_m), t(lang, "card_elevation")))
     if kind == "run" and stats["best_1k_s"]:
-        cells.append((fmt_duration(stats["best_1k_s"]), "лучший 1 км"))
-    cells = (cells + [(fmt_duration(stats["duration_s"]), "всего")])[:6]  # сетка 3×2
+        cells.append((fmt_duration(stats["best_1k_s"]), t(lang, "rec_best_1k_s")))
+    cells = (cells + [(fmt_duration(stats["duration_s"]), t(lang, "card_total"))])[:6]  # сетка 3×2
     col_w = (W - 2 * PAD) / 3
     for i, (value, label) in enumerate(cells):
         x, y = PAD + i % 3 * col_w, 1320 + i // 3 * 170

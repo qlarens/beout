@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Be. Out! — terms and privacy</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0 auto; padding: 16px; max-width: 720px;
+    background: Canvas; color: CanvasText;
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  h1 { font-size: 22px; }
+  h2 { font-size: 17px; margin-top: 24px; }
+  .hint { opacity: .7; font-size: 13px; }
+  li { margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<h1>Be. Out! — terms of use and privacy policy</h1>
+<p class="hint">Revision 4 of 24 November 2026 · <a href="/privacy?lang=ru">Русский</a> · <a href="/privacy?lang=uk">Українська</a> · English</p>
+
+<p>Be. Out! is a free, non-commercial workout tracker (cycling, running, walking) in Telegram. By tapping “I accept” in the chat with the bot,
+you agree to these terms and consent to the data processing described below.
+Without your consent the bot records nothing.</p>
+
+<h2>1. Who processes the data</h2>
+<p>The owner of the bot (the operator). Contact: <a href="https://github.com/qlarens/beout/issues">github.com/qlarens/beout/issues</a>.
+This is a public page, so don't post personal data there. You can delete and export your data
+yourself with bot commands (see section 6).</p>
+
+<h2>2. What data is stored</h2>
+<ul>
+  <li><b>Location while you share it live</b>: coordinates, time and accuracy of each point. Only while you share your live location with the bot yourself.</li>
+  <li><b>Telegram ID</b>, the chat ID and the ID of the live location message — to link points to a workout and to reply to you.</li>
+  <li><b>Weight</b>, if you enter it (otherwise 75 kg is used) — to estimate calories.</li>
+  <li><b>Workout stats</b> calculated from the points: type, distance, time, speed, calories, records.</li>
+  <li><b>Language</b>: the language of your Telegram (Russian, Ukrainian or English; any other counts as English) and the language chosen in the Mini App profile — so that the bot, the app and the cards speak it.</li>
+  <li><b>Consent record</b>: date and version of the accepted terms.</li>
+  <li><b>Joint workouts and group leaderboards</b> — only if you created a session yourself, joined one, or tapped “Join” in a group.</li>
+  <li><b>Emergency contacts</b>: Telegram IDs of people who agreed via your link themselves. If you agreed to be someone's contact, only your Telegram ID and language (so that an SOS arrives in it) are stored.</li>
+  <li><b>Elevation gain</b> of a workout, if it could be determined (see Open-Meteo in section 4).</li>
+</ul>
+<p>Your name, username, phone number and profile photo are not stored. The bot requests your name from Telegram
+when showing it to joint workout participants or on a group leaderboard. No cookies or trackers are used.</p>
+
+<h2>2a. What others see</h2>
+<ul>
+  <li>By default only you see your workouts.</li>
+  <li><b>Workout card</b> (route on a map, distance, time, speed, calories; the Instagram card also has the date and elevation gain) reaches a chat or a social network only when you send it yourself. The map shows where you started and finished — keep that in mind if you start from home.</li>
+  <li><b>Joint workout</b>: session participants see your name, route and stats of workouts started within 12 hours after the session was created. Invitations go by a link that a participant shares.</li>
+  <li><b>Group leaderboard</b>: group members see your name and weekly distance by type — only after “Join”; “Leave” removes you from the leaderboard.</li>
+  <li><b>SOS</b>: when you press SOS and confirm, your emergency contacts receive your name and last location.</li>
+</ul>
+
+<h2>3. Why</h2>
+<p>To show you your route, stats and workout results, and, when you choose to, to the people you picked (section 2a). Data is not sold,
+not used for ads and not shared with third parties other than the services listed below,
+without which the bot can't work. The legal basis is your consent.</p>
+
+<h2>4. Services involved</h2>
+<ul>
+  <li><b>Telegram</b> — delivers messages and the live location (under its own privacy policy).</li>
+  <li><b>Cloudflare</b> — network intermediary: the Mini App reaches the server through it. Technically it sees the IP address and requests.</li>
+  <li><b>OpenStreetMap</b> — map tiles are loaded from OSM servers straight into your Telegram: they see your IP address and which part of the map is open. For a workout card the server loads tiles of the route area — OSM sees the server's IP address and the map area, without your Telegram ID or name.</li>
+  <li><b>unpkg.com</b> and <b>telegram.org</b> — serve the Mini App scripts (the Leaflet map library and the Telegram SDK); they see your IP address.</li>
+  <li><b>Open-Meteo</b> (open-meteo.com) — after a workout the server sends it the coordinates of the route points, without your Telegram ID or name, to get the elevation. It sees the server's IP address, not yours.</li>
+</ul>
+<p>The database is stored on the operator's server; only the operator has access to it.</p>
+
+<h2>5. How long data is kept</h2>
+<ul>
+  <li>Until you delete it yourself with /delete.</li>
+  <li>Database backups are made daily and kept for 7 days — after /delete your data disappears from them within 7 days at the latest.</li>
+  <li>Technical server logs (request times, errors) contain no coordinates and are overwritten when the service restarts.</li>
+</ul>
+
+<h2>6. Your rights</h2>
+<ul>
+  <li><b>View</b> your workouts — in the Mini App (“My workouts”).</li>
+  <li><b>Delete a single workout</b> — on its screen in the Mini App.</li>
+  <li><b>Export</b> all data about you to a JSON file — the /export command.</li>
+  <li><b>Correct</b> your weight — the /weight command or the Mini App profile; language — the Mini App profile.</li>
+  <li><b>Delete</b> all data and <b>withdraw consent</b> — the /delete command. Deletion happens immediately.</li>
+  <li>Messages in the chat with the bot (including live locations) are deleted with Telegram's own tools.</li>
+  <li>If you believe your rights have been violated, you can contact the data protection authority of your country.</li>
+</ul>
+
+<h2>7. Security</h2>
+<p>The Mini App receives data only after verifying the Telegram signature, so other people's workouts can't be seen without their action.
+The server isn't exposed to the internet directly, the bot runs under a separate account with minimal permissions,
+and deleted data is overwritten in the database file.</p>
+
+<h2>8. Terms of use</h2>
+<ul>
+  <li>The service is provided “as is”, without warranties: recording may be interrupted; distance and calories are estimates, not medical advice.</li>
+  <li>Follow traffic rules. Don't look at your phone while riding.</li>
+  <li>You turn live location sharing on and off yourself; the bot does not track your location in the background.</li>
+  <li>SOS does not replace emergency services: delivery depends on Telegram and the mobile network. If you're in danger, call 112.</li>
+  <li>The operator may change these terms. The bot will then ask you to accept the new revision; until you do, new workouts are not recorded.</li>
+</ul>
+</body>
+</html>

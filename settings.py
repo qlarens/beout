@@ -6,7 +6,6 @@
 import math
 
 APP_NAME = "Be. Out!"
-CARD_WATERMARK = "@beoutbot от lilaxy.com"  # под названием на карточках: откуда бот
 
 # --- точки GPS ---
 MAX_ACCURACY_M = 30  # точки с погрешностью больше — шум GPS (здания, тоннели), не сохраняем
@@ -18,16 +17,16 @@ AUTOPAUSE_AFTER_S = 12
 # met: (верхняя граница скорости в км/ч, MET) по Compendium of Physical Activities (2011).
 ACTIVITIES = {
     "ride": {
-        "title": "Велосипед", "max_kmh": 70, "pause_kmh": 3,
+        "max_kmh": 70, "pause_kmh": 3,
         "met": [(16.1, 4.0), (19.3, 6.8), (22.5, 8.0), (25.7, 10.0), (32.2, 12.0), (math.inf, 15.8)],
     },
     "run": {
-        "title": "Бег", "max_kmh": 25, "pause_kmh": 3,
+        "max_kmh": 25, "pause_kmh": 3,
         "met": [(7.2, 6.0), (8.9, 8.3), (10.3, 9.8), (11.7, 11.0), (13.4, 11.8), (15.3, 12.8),
                 (16.9, 14.5), (math.inf, 16.0)],
     },
     "walk": {
-        "title": "Ходьба", "max_kmh": 10, "pause_kmh": 1,
+        "max_kmh": 10, "pause_kmh": 1,
         "met": [(3.2, 2.0), (4.0, 2.8), (4.8, 3.0), (5.6, 3.5), (6.4, 4.3), (7.2, 5.0), (math.inf, 7.0)],
     },
 }

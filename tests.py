@@ -4,7 +4,9 @@ import hmac
 import io
 import json
 import os
+import re
 import sqlite3
+import string
 import tempfile
 import time
 import unittest
@@ -32,13 +34,14 @@ from auth import validate_init_data  # noqa: E402
 from cards import MAP_H, MAP_MARGIN, MAP_W, TILE, map_view, project, render_card, render_story  # noqa: E402
 from aiohttp import web  # noqa: E402
 from stats import compute_stats, elevation_gain, streaks  # noqa: E402
-from settings import CARD_WATERMARK, MAP_MAX_ZOOM, SESSION_TTL_S  # noqa: E402
+from i18n import TEXTS, pick, t  # noqa: E402
+from settings import MAP_MAX_ZOOM, SESSION_TTL_S  # noqa: E402
 from storage import SCHEMA, STALE_AFTER_S, Storage  # noqa: E402
 
 
 def init_data(user_id, token=TOKEN, auth_date=None):
     """initData, подписанная так же, как это делает Telegram."""
-    pairs = {"auth_date": str(int(auth_date or time.time())), "user": json.dumps({"id": user_id})}
+    pairs = {"auth_date": str(int(auth_date or time.time())), "user": json.dumps({"id": user_id, "language_code": "ru"})}
     check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
     secret = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
     pairs["hash"] = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
@@ -64,6 +67,36 @@ def track(*legs, dt=6):
     return points
 
 
+class I18nTest(unittest.TestCase):
+    def test_pick(self):
+        for code, lang in (("ru", "ru"), ("uk", "uk"), ("en-US", "en"), ("UK", "uk"), ("de", "en"), (None, "en")):
+            self.assertEqual(pick(code), lang)
+
+    def test_every_text_in_every_language(self):
+        fields = lambda text: sorted(f for _, f, _, _ in string.Formatter().parse(text) if f)
+        for key, texts in TEXTS.items():
+            self.assertEqual(set(texts), {"ru", "uk", "en"}, key)
+            self.assertEqual(len({tuple(fields(text)) for text in texts.values()}), 1, key)  # одни и те же {поля}
+
+    def test_mini_app_has_every_key_in_every_language(self):
+        html = (bot.WEBAPP_DIR / "index.html").read_text(encoding="utf-8")
+        block = html[html.index("const I18N = {"):html.index("const t = (key")]
+        keys = {
+            lang: set(re.findall(r"(?:^\s+|,\s)([a-z][a-z0-9_]*): ", part, re.M))
+            for lang, part in zip(("ru", "uk", "en"), re.split(r"\n  (?:ru|uk|en): \{", block)[1:])
+        }
+        self.assertGreater(len(keys["ru"]), 50)
+        self.assertEqual(keys["ru"], keys["uk"])
+        self.assertEqual(keys["ru"], keys["en"])
+
+    def test_cards_in_other_languages(self):
+        stats = compute_stats(track((1.2, 10)), 70, "run")
+        for lang, label in (("en", "km/h average"), ("uk", "км/год середня")):
+            with patch.object(ImageDraw.ImageDraw, "text", autospec=True) as text:
+                render_story("run", stats, [], None, 12, "", lang)
+            self.assertIn(label, [c.args[2] for c in text.call_args_list])
+
+
 class AuthTest(unittest.TestCase):
     def test_valid(self):
         self.assertEqual(validate_init_data(init_data(5), TOKEN)["id"], 5)
@@ -73,7 +106,8 @@ class AuthTest(unittest.TestCase):
 
     def test_tampered_user(self):
         forged = init_data(5).replace(
-            urlencode({"user": json.dumps({"id": 5})}), urlencode({"user": json.dumps({"id": 6})})
+            urlencode({"user": json.dumps({"id": 5, "language_code": "ru"})}),
+            urlencode({"user": json.dumps({"id": 6, "language_code": "ru"})}),
         )
         self.assertIsNone(validate_init_data(forged, TOKEN))
 
@@ -235,7 +269,7 @@ class StorageTest(unittest.TestCase):
         self.assertNotEqual(self.db.sos_token(1), token)
         self.db.set_sos_contact(1, 3, False)
         self.assertEqual(self.db.sos_contacts(1), [2])
-        self.assertEqual(self.db.export_user(2)["sos_contact_for"], [1])
+        self.assertEqual(self.db.export_user(2)["sos_contact_for"], [{"user_id": 1, "lang": None}])
         self.db.delete_user(2)  # контакт удалил свои данные
         self.assertEqual(self.db.sos_contacts(1), [])
 
@@ -364,6 +398,7 @@ def fake_bot():
         send_location=AsyncMock(),
         send_photo=AsyncMock(return_value=SimpleNamespace(photo=[SimpleNamespace(file_id="small"), SimpleNamespace(file_id="big")])),
         save_prepared_inline_message=AsyncMock(return_value=SimpleNamespace(id="prep1")),
+        set_chat_menu_button=AsyncMock(),
         me=AsyncMock(return_value=SimpleNamespace(username="beout_bot")),
         get_chat=AsyncMock(side_effect=lambda user_id: SimpleNamespace(first_name=f"User{user_id}")),
         get_chat_member=AsyncMock(side_effect=lambda chat_id, user_id: SimpleNamespace(
@@ -436,12 +471,12 @@ class CardTest(unittest.TestCase):
         stats = compute_stats(track((1.2, 10)), 70, "run")
         for elevation, shown in ((None, False), (0, False), (35, True)):
             with patch.object(ImageDraw.ImageDraw, "text", autospec=True) as text:
-                render_story("run", stats, [], None, elevation, "")
+                render_story("run", stats, [], None, elevation, "", "ru")
             labels = [c.args[2] for c in text.call_args_list]
             self.assertEqual("набор высоты" in labels, shown)
             self.assertIn("лучший 1 км", labels)
             self.assertEqual(len(labels), 3 + 2 + 6 * 2)  # шапка, дистанция с «км», полная сетка 3×2
-            self.assertIn(CARD_WATERMARK, labels)
+            self.assertIn("@beoutbot от lilaxy.com", labels)
 
     def test_map_view(self):
         def on_card(route):
@@ -515,8 +550,8 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         for user_id in user_ids:
             bot.db.set_consent(user_id, bot.POLICY_VERSION)
 
-    async def call(self, method, path, user_id=None, **kwargs):
-        headers = {"X-Init-Data": init_data(user_id)} if user_id else {}
+    async def call(self, method, path, user_id=None, headers=None, **kwargs):
+        headers = {**({"X-Init-Data": init_data(user_id)} if user_id else {}), **(headers or {})}
         return await self.client.request(method, path, headers=headers, **kwargs)
 
     async def test_requires_signature(self):
@@ -542,7 +577,7 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         self.assertFalse((await response.json())["ride"]["active"])
         self.tg.send_message.assert_awaited_once()  # итог пришёл в чат
-        self.assertIn(bot.LIVE_WARNING, self.tg.send_message.call_args.args[1])  # трансляция ещё идёт
+        self.assertIn(t("ru", "live_warning"), self.tg.send_message.call_args.args[1])  # трансляция ещё идёт
 
     async def test_weight_validation(self):
         self.consent(1)
@@ -583,7 +618,7 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.tg.send_photo.reset_mock()
         with patch.object(bot, "render_story", wraps=bot.render_story) as render:
             self.assertEqual((await self.call("POST", path, 1)).status, 200)
-        self.assertEqual(render.call_args.args[-1], "13.01.1970")
+        self.assertEqual(render.call_args.args[-2:], ("13.01.1970", "ru"))
         photo = self.tg.send_photo.call_args
         self.assertEqual(photo.args[0], 1)
         self.assertEqual(Image.open(io.BytesIO(photo.args[1].data)).size, (1080, 1920))
@@ -660,14 +695,15 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         bot.db.add_point(ride_id, time.time() - 120, 52.1, 21.2)
         self.assertEqual((await self.call("POST", "/api/sos/send", 1)).status, 400)  # нет контактов
 
-        bot.db.set_sos_contact(1, 2, True)
-        bot.db.set_sos_contact(1, 3, True)
+        bot.db.set_sos_contact(1, 2, True, "ru")
+        bot.db.set_sos_contact(1, 3, True, "uk")  # язык, на котором контакт соглашался
         self.tg.send_message.side_effect = lambda chat_id, text: (
             (_ for _ in ()).throw(bot.TelegramForbiddenError(method=None, message="blocked")) if chat_id == 3 else None)
         result = await (await self.call("POST", "/api/sos/send", 1)).json()
         self.assertEqual(result, {"sent": 1, "total": 2})  # заблокировавший бота не мешает остальным
         self.tg.send_location.assert_awaited_once_with(2, 52.1, 21.2)
         self.assertIn("2 мин назад", self.tg.send_message.call_args_list[0].args[1])
+        self.assertIn("2 хв тому", self.tg.send_message.call_args_list[1].args[1])  # каждому — на его языке
 
         contacts = (await (await self.call("GET", "/api/sos", 1)).json())["contacts"]
         self.assertEqual(contacts, [{"id": 2, "name": "User2"}, {"id": 3, "name": "User3"}])
@@ -683,7 +719,7 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
             ride = (await (await self.call("POST", f"/api/rides/{ride_id}/finish", 1)).json())["ride"]
         self.assertEqual(ride["elevation_gain_m"], 23)  # сглаживание по 3 точкам: вершина 123.3
         self.assertIn("Набор высоты: 23 м", self.tg.send_message.call_args.args[1])
-        self.assertNotIn(bot.LIVE_WARNING, self.tg.send_message.call_args.args[1])  # трансляции не было
+        self.assertNotIn(t("ru", "live_warning"), self.tg.send_message.call_args.args[1])  # трансляции не было
 
     async def test_change_kind(self):
         self.consent(1, 2)
@@ -713,6 +749,31 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         response = await self.call("GET", "/privacy")
         self.assertEqual(response.status, 200)
         self.assertIn("/delete", await response.text())
+        for lang, text in (("en", "Revision 4"), ("uk", "Редакція 4"), ("de", "Редакция 4")):
+            self.assertIn(text, await (await self.call("GET", f"/privacy?lang={lang}")).text())
+
+    async def test_language(self):
+        self.consent(1)
+        me = await (await self.call("GET", "/api/rides", 1)).json()
+        self.assertEqual((me["lang"], me["lang_choice"]), ("ru", None))  # из initData: язык Telegram
+        self.assertEqual((await self.call("POST", "/api/lang", 1, json={"lang": "de"})).status, 400)
+        response = await self.call("POST", "/api/lang", 1, json={"lang": "uk"})
+        self.assertEqual(await response.json(), {"lang": "uk", "lang_choice": "uk"})
+        self.tg.set_chat_menu_button.assert_awaited_once()  # кнопка меню — тоже на новом языке
+        self.assertEqual(self.tg.set_chat_menu_button.call_args.kwargs["menu_button"].text, "Мої тренування")
+        self.assertEqual((await (await self.call("GET", "/api/rides", 1)).json())["lang"], "uk")
+
+        ride_id = bot.db.start_ride(1, 1, 1, time.time(), kind="run")
+        await self.call("POST", f"/api/rides/{ride_id}/finish", 1)
+        self.assertIn("Біг: тренування завершено", self.tg.send_message.call_args.args[1])  # бот — тоже
+
+        await self.call("POST", "/api/lang", 1, json={"lang": None})  # снова как в Telegram
+        self.assertEqual((await (await self.call("GET", "/api/rides", 1)).json())["lang"], "ru")
+
+        missing = await self.call("GET", "/api/rides/999", 1, headers={"X-Lang": "uk"})
+        self.assertEqual(await missing.text(), "Тренування не знайдено")  # ошибки — на языке Mini App
+        self.assertEqual(await (await self.call("GET", "/api/rides", headers={"X-Lang": "en"})).text(),
+                         "Open the app from Telegram")
 
 
 class HandlersTest(unittest.IsolatedAsyncioTestCase):
@@ -725,14 +786,14 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
 
     def location(self, live_period=900):
         return SimpleNamespace(
-            from_user=SimpleNamespace(id=1), chat=SimpleNamespace(id=1), message_id=7,
+            from_user=SimpleNamespace(language_code="ru", id=1), chat=SimpleNamespace(id=1), message_id=7,
             date=time.time(), edit_date=time.time(), answer=AsyncMock(), bot=self.tg,
             location=SimpleNamespace(latitude=52.0, longitude=21.0, horizontal_accuracy=5,
                                      live_period=live_period),
         )
 
     def callback(self, data):
-        return SimpleNamespace(from_user=SimpleNamespace(id=1), message=None, data=data,
+        return SimpleNamespace(from_user=SimpleNamespace(language_code="ru", id=1), message=None, data=data,
                                bot=self.tg, answer=AsyncMock())
 
     async def test_nothing_recorded_without_consent(self):
@@ -740,6 +801,28 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         await bot.on_location(msg)
         self.assertIsNone(bot.db.active_ride(1))
         self.assertIn("Принимаю", msg.answer.call_args.args[0])
+
+    async def test_language_from_telegram(self):
+        for code, word in (("uk", "Приймаю"), ("en-US", "I accept"), ("de", "I accept"), (None, "I accept")):
+            msg = self.location()
+            msg.from_user.language_code = code
+            await bot.on_location(msg)
+            self.assertIn(word, msg.answer.call_args.args[0])  # нет перевода — английский
+        self.assertIsNone(bot.db.conn.execute("SELECT * FROM users").fetchone())  # до согласия ничего не храним
+
+        consent = self.callback("consent")
+        consent.from_user.language_code = "uk"
+        await bot.on_consent(consent)
+        self.assertIn("Привіт", self.tg.send_message.call_args.args[1])
+        self.assertEqual(self.tg.set_chat_menu_button.call_args.kwargs["menu_button"].text, "Мої тренування")
+        self.assertEqual(bot.db.user_lang(1), "uk")  # запомнили — для итога по таймеру и SOS
+
+        bot.db.set_lang(1, "en")  # выбор в профиле важнее языка Telegram
+        msg = self.location()
+        msg.from_user.language_code = "uk"
+        await bot.on_location(msg)
+        self.assertIn("Workout started", msg.answer.call_args.args[0])
+        self.assertIn("Cycling", str(msg.answer.call_args.kwargs["reply_markup"]))
 
     async def test_ride_lifecycle_and_delete(self):
         await bot.on_consent(self.callback("consent"))
@@ -762,7 +845,7 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         token = bot.db.sos_token(1)
 
         def start(user_id, args):
-            msg = SimpleNamespace(from_user=SimpleNamespace(id=user_id), bot=self.tg, answer=AsyncMock())
+            msg = SimpleNamespace(from_user=SimpleNamespace(language_code="ru", id=user_id), bot=self.tg, answer=AsyncMock())
             return msg, SimpleNamespace(args=args)
 
         own, command = start(1, f"sos_{token}")
@@ -775,19 +858,19 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.db.sos_contacts(1), [])  # пока не согласился — не контакт
 
         accept = self.callback(f"sos:on:{token}")
-        accept.from_user = SimpleNamespace(id=2)
+        accept.from_user = SimpleNamespace(language_code="ru", id=2)
         await bot.on_sos_contact(accept)
         self.assertEqual(bot.db.sos_contacts(1), [2])
         self.assertEqual(self.tg.send_message.call_args.args[0], 1)  # владельцу сообщили
 
         reused = self.callback(f"sos:on:{token}")  # ссылку переслали дальше
-        reused.from_user = SimpleNamespace(id=3)
+        reused.from_user = SimpleNamespace(language_code="ru", id=3)
         await bot.on_sos_contact(reused)
         self.assertEqual(bot.db.sos_contacts(1), [2])
         self.assertTrue(reused.answer.call_args.kwargs["show_alert"])
 
         leave = self.callback("sos:off:1")
-        leave.from_user = SimpleNamespace(id=2)
+        leave.from_user = SimpleNamespace(language_code="ru", id=2)
         await bot.on_sos_contact(leave)
         self.assertEqual(bot.db.sos_contacts(1), [])
 
@@ -800,14 +883,15 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((await bot.private.edited_message.check_root_filters(self.group_message()))[0])
 
     def group_message(self, chat_type="supergroup"):
-        return SimpleNamespace(chat=SimpleNamespace(id=-100, type=chat_type), bot=self.tg, answer=AsyncMock())
+        return SimpleNamespace(chat=SimpleNamespace(id=-100, type=chat_type), bot=self.tg, answer=AsyncMock(),
+                               from_user=SimpleNamespace(language_code="ru", id=1))
 
     async def test_group_rating(self):
         bot.db.set_consent(1, bot.POLICY_VERSION)
         join = self.callback("rating:join")
         join.message = SimpleNamespace(chat=SimpleNamespace(id=-100))
         stranger = self.callback("rating:join")
-        stranger.from_user, stranger.message = SimpleNamespace(id=2), join.message
+        stranger.from_user, stranger.message = SimpleNamespace(language_code="ru", id=2), join.message
         await bot.on_rating(stranger)  # не запускал бота — в рейтинг не попадает
         self.assertIn("нажми «Старт»", stranger.answer.call_args.args[0])
         await bot.on_rating(join)
@@ -830,6 +914,7 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         monday = bot.week_start(time.time()) + 7 * 86400  # следующий понедельник, 00:00 UTC
         bot.db.set_group_member(-100, 1, True)
         bot.db.set_group_member(-200, 1, True)
+        bot.db.add_group(-100, "ru")  # язык того, кто вызывал /top
         def send(chat_id, *args, **kwargs):
             if chat_id == -200:
                 raise bot.TelegramForbiddenError(method=None, message="kicked")
@@ -861,7 +946,7 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
 
         self.tg.send_message.reset_mock()
         stranger = self.callback(f"finish:{ride['id']}")
-        stranger.from_user = SimpleNamespace(id=2)
+        stranger.from_user = SimpleNamespace(language_code="ru", id=2)
         await bot.on_finish(stranger)
         self.assertIsNone(bot.db.get_ride(ride["id"])["ended_at"])  # чужую не завершить
 
@@ -879,8 +964,8 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         await bot.on_finish(self.callback(f"finish:{ride['id']}"))
         self.assertIsNotNone(bot.db.get_ride(ride["id"])["ended_at"])
         self.assertEqual(self.tg.send_message.await_count, 1)  # итог — ровно один раз
-        self.assertEqual(finish.answer.call_args, ((bot.LIVE_WARNING,), {"show_alert": True}))
-        self.assertIn(bot.LIVE_WARNING, self.tg.send_message.call_args.args[1])
+        self.assertEqual(finish.answer.call_args, ((t("ru", "live_warning"),), {"show_alert": True}))
+        self.assertIn(t("ru", "live_warning"), self.tg.send_message.call_args.args[1])
         summary = self.tg.send_message.call_args.kwargs["reply_markup"]
         self.assertIn(f"share:{ride['id']}", [b.callback_data for row in summary.inline_keyboard for b in row])
 

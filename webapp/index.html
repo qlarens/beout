@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
@@ -60,6 +60,8 @@
 
   .chips { display: flex; gap: 8px; overflow-x: auto; margin-bottom: 12px; }
   .chips button { flex: 1; min-width: 0; padding: 8px 6px; gap: 6px; font-size: 13px; }
+  .chips.wrap { flex-wrap: wrap; }
+  .chips.wrap button { flex: 1 1 40%; }
   .chips button[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); font-weight: 600; }
 
   .row {
@@ -129,101 +131,268 @@
 <section id="home" data-tab>
   <h1>Be. Out!</h1>
   <div id="active-card"></div>
-  <div class="chips" id="home-kinds" role="group" aria-label="Тип тренировки"></div>
-  <button class="primary wide" id="start">Начать тренировку</button>
+  <div class="chips" id="home-kinds" role="group" data-t-aria="kind_group"></div>
+  <button class="primary wide" id="start" data-t="start"></button>
   <p></p>
-  <button class="wide" id="together"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.6 2.9-5.5 6.5-5.5s6.5 1.9 6.5 5.5"/><circle cx="17" cy="9" r="2.5"/><path d="M17 14.5c2.6 0 4.5 1.4 4.5 4.5"/></svg>Совместная тренировка</button>
-  <h2>Последняя тренировка</h2>
+  <button class="wide" id="together"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.6 2.9-5.5 6.5-5.5s6.5 1.9 6.5 5.5"/><circle cx="17" cy="9" r="2.5"/><path d="M17 14.5c2.6 0 4.5 1.4 4.5 4.5"/></svg><span></span></button>
+  <h2 data-t="last_ride"></h2>
   <div id="last-ride"></div>
   <p class="hint" id="streak"></p>
-  <h2>Эта неделя</h2>
+  <h2 data-t="this_week"></h2>
   <div id="week"></div>
-  <h2>Этот месяц</h2>
+  <h2 data-t="this_month"></h2>
   <div id="month"></div>
 </section>
 
 <section id="history" data-tab class="hidden">
-  <h1>История</h1>
-  <div class="chips" id="history-kinds" role="group" aria-label="Фильтр по типу"></div>
+  <h1 data-t="history"></h1>
+  <div class="chips" id="history-kinds" role="group" data-t-aria="filter_group"></div>
   <div id="rides"></div>
-  <button class="wide hidden" id="more">Показать ещё</button>
+  <button class="wide hidden" id="more" data-t="more"></button>
 </section>
 
 <section id="profile" data-tab class="hidden">
-  <h1>Профиль</h1>
-  <h2>Вес</h2>
+  <h1 data-t="profile"></h1>
+  <h2 data-t="weight"></h2>
   <div class="weight-row">
-    <label for="weight" class="hint">кг</label>
+    <label for="weight" class="hint" data-t="kg"></label>
     <input id="weight" type="number" inputmode="decimal" min="30" max="250" step="0.5">
-    <button id="save-weight">Сохранить</button>
+    <button id="save-weight" data-t="save"></button>
   </div>
-  <p class="hint">Нужен для оценки калорий по методу MET: это примерная оценка, а не медицинский расчёт.</p>
-  <h2>Тип по умолчанию</h2>
-  <div class="chips" id="profile-kinds" role="group" aria-label="Тип по умолчанию"></div>
-  <h2>Личные рекорды</h2>
+  <p class="hint" data-t="weight_hint"></p>
+  <h2 data-t="language"></h2>
+  <div class="chips wrap" id="profile-lang" role="group" data-t-aria="language"></div>
+  <h2 data-t="default_kind"></h2>
+  <div class="chips" id="profile-kinds" role="group" data-t-aria="default_kind"></div>
+  <h2 data-t="records"></h2>
   <div id="records"></div>
-  <h2>Экстренные контакты (SOS)</h2>
-  <p class="hint">Контакт сам открывает ссылку и соглашается. Кнопка SOS — на экране идущей тренировки:
-    контакты получат твою последнюю геопозицию. Это не вызов экстренных служб — в опасности звони 112.</p>
+  <h2 data-t="sos_title"></h2>
+  <p class="hint" data-t="sos_hint"></p>
   <div id="sos-contacts"></div>
   <p></p>
-  <button class="wide" id="sos-invite">Пригласить контакт</button>
-  <h2>Мои данные</h2>
-  <p class="hint">Выгрузить все данные — /export, удалить всё — /delete в чате с ботом.<br>
-    <a href="/privacy" id="privacy-link">Условия и политика конфиденциальности</a></p>
+  <button class="wide" id="sos-invite" data-t="sos_invite"></button>
+  <h2 data-t="my_data"></h2>
+  <p class="hint"><span data-t="data_hint"></span><br>
+    <a href="/privacy" id="privacy-link" data-t="privacy_link"></a></p>
 </section>
 
 <section id="ride" class="hidden">
-  <div class="chips" id="ride-kinds" role="group" aria-label="Тип тренировки"></div>
+  <div class="chips" id="ride-kinds" role="group" data-t-aria="kind_group"></div>
   <h1 id="ride-title"></h1>
   <div id="ride-records"></div>
   <div id="ride-live"></div>
-  <button class="wide sos hidden" id="sos"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17v.01"/></svg>SOS — экстренным контактам</button>
+  <button class="wide sos hidden" id="sos"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17v.01"/></svg><span data-t="sos_button"></span></button>
   <div id="map"></div>
   <div class="grid" id="ride-stats"></div>
   <div id="ride-actions" class="hidden">
     <p></p>
-    <button class="primary wide" id="share"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13v7h16v-7M12 3v12M7 8l5-5 5 5"/></svg>Поделиться карточкой</button>
+    <button class="primary wide" id="share"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13v7h16v-7M12 3v12M7 8l5-5 5 5"/></svg><span data-t="share"></span></button>
     <p></p>
-    <button class="wide" id="story"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="2.5" width="14" height="19" rx="3"/><circle cx="10" cy="8.5" r="1.5"/><path d="m19 15-4.5-4.5L5 20"/></svg>Карточка для Instagram</button>
+    <button class="wide" id="story"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="2.5" width="14" height="19" rx="3"/><circle cx="10" cy="8.5" r="1.5"/><path d="m19 15-4.5-4.5L5 20"/></svg><span data-t="story"></span></button>
   </div>
   <div id="splits"></div>
   <p class="hint" id="ride-hint"></p>
-  <button class="wide danger hidden" id="delete"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/></svg>Удалить тренировку</button>
+  <button class="wide danger hidden" id="delete"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/></svg><span data-t="delete_ride"></span></button>
 </section>
 
 <section id="session" class="hidden">
-  <h1>Совместная тренировка</h1>
-  <p class="hint">Каждый запускает трансляцию геопозиции в чате с ботом — тренировка сама привяжется
-    к этой сессии (в течение 12 часов после создания). Маршруты видят только участники.</p>
+  <h1 data-t="together"></h1>
+  <p class="hint" data-t="session_hint"></p>
   <div id="session-map" class="map"></div>
   <div id="session-people"></div>
   <p></p>
-  <button class="wide" id="invite">Пригласить ещё</button>
+  <button class="wide" id="invite" data-t="invite_more"></button>
   <p></p>
-  <button class="wide danger" id="leave"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></svg>Покинуть совместную тренировку</button>
+  <button class="wide danger" id="leave"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></svg><span data-t="leave"></span></button>
 </section>
 
 <div class="error hidden" id="error" role="alert"></div>
 
 <nav id="tabs">
-  <button data-go="home" aria-current="page"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5.5 9v12h13V9"/></svg>Главная</button>
-  <button data-go="history"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg>История</button>
-  <button data-go="profile"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6 8-6s8 2 8 6"/></svg>Профиль</button>
+  <button data-go="home" aria-current="page"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5.5 9v12h13V9"/></svg><span data-t="tab_home"></span></button>
+  <button data-go="history"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg><span data-t="history"></span></button>
+  <button data-go="profile"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6 8-6s8 2 8 6"/></svg><span data-t="profile"></span></button>
 </nav>
 
 <div class="sheet hidden" id="onboarding" role="dialog" aria-labelledby="onb-title">
-  <h1 id="onb-title">Как начать тренировку</h1>
-  <p class="hint">Запись идёт через трансляцию геопозиции в чате с ботом — даже с заблокированным экраном.</p>
+  <h1 id="onb-title" data-t="onb_title"></h1>
+  <p class="hint" data-t="onb_hint"></p>
   <ol class="steps" id="onb-steps"></ol>
-  <button class="primary wide" id="onb-go">Перейти в чат</button>
+  <button class="primary wide" id="onb-go" data-t="onb_go"></button>
   <p></p>
-  <button class="wide" id="onb-close">Понятно</button>
+  <button class="wide" id="onb-close" data-t="onb_ok"></button>
 </div>
 
 <script>
 const tg = window.Telegram && window.Telegram.WebApp;
 const $ = (id) => document.getElementById(id);
+
+// ---------- языки: ru, uk, en; язык без перевода — английский ----------
+const LANGS = ["ru", "uk", "en"];
+const pickLang = (code) => { const base = (code || "").split("-")[0].toLowerCase(); return LANGS.includes(base) ? base : "en"; };
+// До ответа сервера — последний известный язык или язык Telegram; сервер ещё учитывает выбор в профиле.
+let lang = localStorage.getItem("lang") || pickLang(tg && tg.initDataUnsafe.user && tg.initDataUnsafe.user.language_code);
+const slavic = (one, few, many) => (n) => plural(n, one, few, many);
+const english = (one, many) => (n) => `${n} ${n === 1 ? one : many}`;
+const I18N = {
+  ru: {
+    locale: "ru-RU", kind_ride: "Велосипед", kind_run: "Бег", kind_walk: "Ходьба", all: "Все",
+    kind_group: "Тип тренировки", filter_group: "Фильтр по типу", default_kind: "Тип по умолчанию",
+    start: "Начать тренировку", together: "Совместная тренировка", together_open: "Открыть совместную тренировку",
+    last_ride: "Последняя тренировка", this_week: "Эта неделя", this_month: "Этот месяц",
+    history: "История", more: "Показать ещё", profile: "Профиль", tab_home: "Главная",
+    weight: "Вес", kg: "кг", save: "Сохранить",
+    weight_hint: "Нужен для оценки калорий по методу MET: это примерная оценка, а не медицинский расчёт.",
+    language: "Язык", lang_auto: "Как в Telegram", records: "Личные рекорды",
+    sos_title: "Экстренные контакты (SOS)",
+    sos_hint: "Контакт сам открывает ссылку и соглашается. Кнопка SOS — на экране идущей тренировки: контакты получат твою последнюю геопозицию. Это не вызов экстренных служб — в опасности звони 112.",
+    sos_invite: "Пригласить контакт", my_data: "Мои данные",
+    data_hint: "Выгрузить все данные — /export, удалить всё — /delete в чате с ботом.",
+    privacy_link: "Условия и политика конфиденциальности",
+    sos_button: "SOS — экстренным контактам", share: "Поделиться карточкой", story: "Карточка для Instagram",
+    delete_ride: "Удалить тренировку",
+    session_hint: "Каждый запускает трансляцию геопозиции в чате с ботом — тренировка сама привяжется к этой сессии (в течение 12 часов после создания). Маршруты видят только участники.",
+    invite_more: "Пригласить ещё", leave: "Покинуть совместную тренировку",
+    onb_title: "Как начать тренировку",
+    onb_hint: "Запись идёт через трансляцию геопозиции в чате с ботом — даже с заблокированным экраном.",
+    onb_go: "Перейти в чат", onb_ok: "Понятно",
+    onb_steps: ["В чате с ботом нажми скрепку", "Выбери «Геопозиция»", "Нажми «Транслировать геопозицию»",
+      "Выбери время с запасом", "Старт! Телефон можно убрать в карман"],
+    rec_distance_km: "Самая длинная", rec_max_speed_kmh: "Максимальная скорость",
+    rec_best_1k_s: "Лучший 1 км", rec_best_5k_s: "Лучшие 5 км", new_record: (what) => `Новый рекорд: ${what.toLowerCase()}`,
+    km: "км", kmh: "км/ч", kcal: "ккал", error_status: (s) => `Ошибка ${s}`,
+    workouts: slavic("тренировка", "тренировки", "тренировок"), nothing_yet: "Пока ничего.",
+    empty_home: "Пока пусто — самое время начать.",
+    streak: (d, w) => `Серия: ${plural(d, "день", "дня", "дней")} · ${plural(w, "неделя", "недели", "недель")} подряд`,
+    no_rides: "Тренировок пока нет.", remove: "Удалить", remove_contact: (name) => `Удалить контакт ${name}`,
+    no_contacts: "Пока нет контактов.", confirm_remove_contact: "Удалить экстренный контакт?",
+    sos_share_text: "Стань моим экстренным контактом: если я нажму SOS на тренировке, бот пришлёт тебе мою геопозицию.",
+    confirm_sos: "Отправить SOS экстренным контактам? Они получат твою последнюю геопозицию.",
+    sos_sent: (sent, total) => `SOS отправлен: ${sent} из ${total}.`,
+    records_empty: "Появятся после первых тренировок.",
+    avg_kmh: "ср. км/ч", max_kmh: "макс. км/ч", moving: "в движении", total: "всего",
+    elevation: "м набора высоты", splits: "Сплиты",
+    live_hint: "Тренировка идёт — данные обновляются каждые 15 секунд.", points: (n) => `Точек маршрута: ${n}`,
+    start_dot: "Старт", now: "Сейчас", finish: "Финиш",
+    together_total: (km) => `Вместе: ${km} км`, you: " (ты)", not_started: "ещё не начал(а) трансляцию",
+    invite_text: "Тренируемся вместе: открой ссылку и запусти трансляцию геопозиции в чате с ботом.",
+    confirm_leave: "Покинуть совместную тренировку? Если в ней больше никого нет, она распустится, а ссылка перестанет работать.",
+    card_in_chat: "Карточка в чате с ботом — перешли её друзьям.",
+    story_in_chat: "Карточка в чате с ботом: открой её, сохрани в галерею и добавь в историю Instagram.",
+    confirm_delete_ride: "Удалить тренировку? Отменить это нельзя.", confirm_finish: "Завершить тренировку?",
+    finished_live: "Тренировка завершена. Трансляция геопозиции ещё идёт: останови её в чате с ботом — крестик на плашке трансляции вверху чата.",
+  },
+  uk: {
+    locale: "uk-UA", kind_ride: "Велосипед", kind_run: "Біг", kind_walk: "Ходьба", all: "Усі",
+    kind_group: "Тип тренування", filter_group: "Фільтр за типом", default_kind: "Тип за замовчуванням",
+    start: "Почати тренування", together: "Спільне тренування", together_open: "Відкрити спільне тренування",
+    last_ride: "Останнє тренування", this_week: "Цей тиждень", this_month: "Цей місяць",
+    history: "Історія", more: "Показати ще", profile: "Профіль", tab_home: "Головна",
+    weight: "Вага", kg: "кг", save: "Зберегти",
+    weight_hint: "Потрібна для оцінки калорій за методом MET: це приблизна оцінка, а не медичний розрахунок.",
+    language: "Мова", lang_auto: "Як у Telegram", records: "Особисті рекорди",
+    sos_title: "Екстрені контакти (SOS)",
+    sos_hint: "Контакт сам відкриває посилання й погоджується. Кнопка SOS — на екрані поточного тренування: контакти отримають твою останню геопозицію. Це не виклик екстрених служб — у небезпеці телефонуй 112.",
+    sos_invite: "Запросити контакт", my_data: "Мої дані",
+    data_hint: "Вивантажити всі дані — /export, видалити все — /delete у чаті з ботом.",
+    privacy_link: "Умови та політика конфіденційності",
+    sos_button: "SOS — екстреним контактам", share: "Поділитися карткою", story: "Картка для Instagram",
+    delete_ride: "Видалити тренування",
+    session_hint: "Кожен запускає трансляцію геопозиції в чаті з ботом — тренування саме прив'яжеться до цієї сесії (протягом 12 годин після створення). Маршрути бачать лише учасники.",
+    invite_more: "Запросити ще", leave: "Покинути спільне тренування",
+    onb_title: "Як почати тренування",
+    onb_hint: "Запис іде через трансляцію геопозиції в чаті з ботом — навіть із заблокованим екраном.",
+    onb_go: "Перейти в чат", onb_ok: "Зрозуміло",
+    onb_steps: ["У чаті з ботом натисни скріпку", "Вибери «Геопозиція»", "Натисни «Транслювати геопозицію»",
+      "Вибери час із запасом", "Старт! Телефон можна сховати в кишеню"],
+    rec_distance_km: "Найдовше", rec_max_speed_kmh: "Максимальна швидкість",
+    rec_best_1k_s: "Найкращий 1 км", rec_best_5k_s: "Найкращі 5 км", new_record: (what) => `Новий рекорд: ${what.toLowerCase()}`,
+    km: "км", kmh: "км/год", kcal: "ккал", error_status: (s) => `Помилка ${s}`,
+    workouts: slavic("тренування", "тренування", "тренувань"), nothing_yet: "Поки нічого.",
+    empty_home: "Поки порожньо — саме час почати.",
+    streak: (d, w) => `Серія: ${plural(d, "день", "дні", "днів")} · ${plural(w, "тиждень", "тижні", "тижнів")} поспіль`,
+    no_rides: "Тренувань поки немає.", remove: "Видалити", remove_contact: (name) => `Видалити контакт ${name}`,
+    no_contacts: "Поки немає контактів.", confirm_remove_contact: "Видалити екстрений контакт?",
+    sos_share_text: "Стань моїм екстреним контактом: якщо я натисну SOS на тренуванні, бот надішле тобі мою геопозицію.",
+    confirm_sos: "Надіслати SOS екстреним контактам? Вони отримають твою останню геопозицію.",
+    sos_sent: (sent, total) => `SOS надіслано: ${sent} з ${total}.`,
+    records_empty: "З'являться після перших тренувань.",
+    avg_kmh: "сер. км/год", max_kmh: "макс. км/год", moving: "у русі", total: "загалом",
+    elevation: "м набору висоти", splits: "Спліти",
+    live_hint: "Тренування триває — дані оновлюються кожні 15 секунд.", points: (n) => `Точок маршруту: ${n}`,
+    start_dot: "Старт", now: "Зараз", finish: "Фініш",
+    together_total: (km) => `Разом: ${km} км`, you: " (ти)", not_started: "ще не почав(ла) трансляцію",
+    invite_text: "Тренуємося разом: відкрий посилання й запусти трансляцію геопозиції в чаті з ботом.",
+    confirm_leave: "Покинути спільне тренування? Якщо в ньому більше нікого немає, воно розпуститься, а посилання перестане працювати.",
+    card_in_chat: "Картка в чаті з ботом — перешли її друзям.",
+    story_in_chat: "Картка в чаті з ботом: відкрий її, збережи в галерею та додай в історію Instagram.",
+    confirm_delete_ride: "Видалити тренування? Скасувати це неможливо.", confirm_finish: "Завершити тренування?",
+    finished_live: "Тренування завершено. Трансляція геопозиції ще триває: зупини її в чаті з ботом — хрестик на плашці трансляції вгорі чату.",
+  },
+  en: {
+    locale: "en-GB", kind_ride: "Cycling", kind_run: "Running", kind_walk: "Walking", all: "All",
+    kind_group: "Workout type", filter_group: "Filter by type", default_kind: "Default type",
+    start: "Start a workout", together: "Workout together", together_open: "Open joint workout",
+    last_ride: "Last workout", this_week: "This week", this_month: "This month",
+    history: "History", more: "Show more", profile: "Profile", tab_home: "Home",
+    weight: "Weight", kg: "kg", save: "Save",
+    weight_hint: "Used to estimate calories with the MET method: a rough estimate, not a medical calculation.",
+    language: "Language", lang_auto: "As in Telegram", records: "Personal records",
+    sos_title: "Emergency contacts (SOS)",
+    sos_hint: "A contact opens the link and agrees themselves. The SOS button is on the screen of an ongoing workout: your contacts get your last location. It doesn't call emergency services — if you're in danger, call 112.",
+    sos_invite: "Invite a contact", my_data: "My data",
+    data_hint: "Export all data with /export, delete everything with /delete in the chat with the bot.",
+    privacy_link: "Terms and privacy policy",
+    sos_button: "SOS to emergency contacts", share: "Share card", story: "Instagram card",
+    delete_ride: "Delete workout",
+    session_hint: "Everyone starts sharing their live location in the chat with the bot — the workout links to this session by itself (within 12 hours of its creation). Only participants see the routes.",
+    invite_more: "Invite more", leave: "Leave the joint workout",
+    onb_title: "How to start a workout",
+    onb_hint: "Recording works through live location sharing in the chat with the bot — even with the screen locked.",
+    onb_go: "Go to chat", onb_ok: "Got it",
+    onb_steps: ["In the chat with the bot, tap the paperclip", "Choose “Location”", "Tap “Share My Live Location”",
+      "Pick a period with time to spare", "Go! You can put your phone in your pocket"],
+    rec_distance_km: "Longest", rec_max_speed_kmh: "Top speed",
+    rec_best_1k_s: "Best 1 km", rec_best_5k_s: "Best 5 km", new_record: (what) => `New record: ${what.toLowerCase()}`,
+    km: "km", kmh: "km/h", kcal: "kcal", error_status: (s) => `Error ${s}`,
+    workouts: english("workout", "workouts"), nothing_yet: "Nothing yet.",
+    empty_home: "Nothing here yet — a good time to start.",
+    streak: (d, w) => `Streak: ${english("day", "days")(d)} · ${english("week", "weeks")(w)} in a row`,
+    no_rides: "No workouts yet.", remove: "Remove", remove_contact: (name) => `Remove contact ${name}`,
+    no_contacts: "No contacts yet.", confirm_remove_contact: "Remove this emergency contact?",
+    sos_share_text: "Be my emergency contact: if I press SOS during a workout, the bot will send you my location.",
+    confirm_sos: "Send SOS to your emergency contacts? They'll get your last location.",
+    sos_sent: (sent, total) => `SOS sent: ${sent} of ${total}.`,
+    records_empty: "They'll appear after your first workouts.",
+    avg_kmh: "avg km/h", max_kmh: "max km/h", moving: "moving", total: "total",
+    elevation: "m elevation gain", splits: "Splits",
+    live_hint: "Workout in progress — data refreshes every 15 seconds.", points: (n) => `Route points: ${n}`,
+    start_dot: "Start", now: "Now", finish: "Finish",
+    together_total: (km) => `Together: ${km} km`, you: " (you)", not_started: "hasn't started sharing yet",
+    invite_text: "Let's train together: open the link and start sharing your live location in the chat with the bot.",
+    confirm_leave: "Leave the joint workout? If no one else is in it, it will be dissolved and the link will stop working.",
+    card_in_chat: "The card is in the chat with the bot — forward it to your friends.",
+    story_in_chat: "The card is in the chat with the bot: open it, save it to your gallery and add it to your Instagram story.",
+    confirm_delete_ride: "Delete this workout? This can't be undone.", confirm_finish: "Finish the workout?",
+    finished_live: "Workout finished. Your live location is still being shared: stop it in the chat with the bot with the ✕ on the live location bar at the top of the chat.",
+  },
+};
+const t = (key, ...args) => { const v = I18N[lang][key]; return typeof v === "function" ? v(...args) : v; };
+const kinds = () => ({ ride: t("kind_ride"), run: t("kind_run"), walk: t("kind_walk") });
+const ONB_ICONS = ["clip", "pin", "live", "clock", "play"];
+function applyLang() {
+  document.documentElement.lang = lang;
+  document.querySelectorAll("[data-t]").forEach((el) => { el.textContent = t(el.dataset.t); });
+  document.querySelectorAll("[data-t-aria]").forEach((el) => el.setAttribute("aria-label", t(el.dataset.tAria)));
+  $("onb-steps").innerHTML = t("onb_steps").map((text, i) => `<li>${icon(ONB_ICONS[i])}<span>${text}</span></li>`).join("");
+  $("privacy-link").href = `/privacy?lang=${lang}`;
+}
+function setLang(next) {
+  if (next === lang) return;
+  lang = next;
+  localStorage.setItem("lang", lang);
+  applyLang();
+}
 
 // ---------- иконки: один набор линейных SVG ----------
 const ICONS = {
@@ -237,12 +406,12 @@ const ICONS = {
   play: '<path d="M7 4.5v15L19 12z"/>',
   trophy: '<path d="M8 4h8v5a4 4 0 0 1-8 0zM8 6H4.5a3.5 3.5 0 0 0 3.8 4M16 6h3.5a3.5 3.5 0 0 1-3.8 4M12 13v4M8 21h8M9.5 17h5"/>',
 };
-// Личные рекорды: подпись и формат значения.
+// Личные рекорды: формат значения (подпись — t(`rec_${key}`)).
 const RECORDS = {
-  distance_km: ["Самая длинная", (v) => `${v} км`],
-  max_speed_kmh: ["Максимальная скорость", (v) => `${v} км/ч`],
-  best_1k_s: ["Лучший 1 км", fmtDuration],
-  best_5k_s: ["Лучшие 5 км", fmtDuration],
+  distance_km: (v) => `${v} ${t("km")}`,
+  max_speed_kmh: (v) => `${v} ${t("kmh")}`,
+  best_1k_s: fmtDuration,
+  best_5k_s: fmtDuration,
 };
 function plural(n, one, few, many) {
   const m10 = n % 10, m100 = n % 100;
@@ -250,7 +419,6 @@ function plural(n, one, few, many) {
 }
 const confirmDialog = (text) => tg ? new Promise((ok) => tg.showConfirm(text, ok)) : Promise.resolve(confirm(text));
 const icon = (name) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
-const KINDS = { ride: "Велосипед", run: "Бег", walk: "Ходьба" };
 
 // ---------- тема ----------
 function applyTheme() {
@@ -269,9 +437,12 @@ applyTheme();
 async function api(path, options = {}) {
   const res = await fetch(path, {
     ...options,
-    headers: { "Content-Type": "application/json", "X-Init-Data": (tg && tg.initData) || "", ...(options.headers || {}) },
+    headers: {
+      "Content-Type": "application/json", "X-Init-Data": (tg && tg.initData) || "", "X-Lang": lang,
+      ...(options.headers || {}),
+    },
   });
-  if (!res.ok) throw new Error((await res.text()) || `Ошибка ${res.status}`);
+  if (!res.ok) throw new Error((await res.text()) || t("error_status", res.status));
   return res.json();
 }
 function showError(err) {
@@ -288,13 +459,13 @@ function fmtDuration(s) {
   return h ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
 }
 function fmtDate(ts) {
-  return new Date(ts * 1000).toLocaleString("ru-RU", { day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" });
+  return new Date(ts * 1000).toLocaleString(t("locale"), { day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" });
 }
 const tile = (value, label) => `<div class="tile"><b>${value}</b><span>${label}</span></div>`;
-const speedOf = (r) => `${r.avg_speed_kmh} км/ч`;
+const speedOf = (r) => `${r.avg_speed_kmh} ${t("kmh")}`;
 
 function kindChips(el, selected, onPick, all) {
-  const options = all ? { "": "Все", ...KINDS } : KINDS;
+  const options = all ? { "": t("all"), ...kinds() } : kinds();
   el.innerHTML = Object.entries(options).map(([k, title]) =>
     `<button data-kind="${k}" aria-pressed="${k === selected}">${k ? icon(k) : ""}${title}</button>`).join("");
   el.onclick = (e) => {
@@ -329,13 +500,13 @@ if (tg) tg.BackButton.onClick(() => showHome().catch(showError));
 
 // ---------- главная ----------
 let me = null; // вес, тип по умолчанию, первая страница тренировок
-async function loadMe() { me = await api("/api/rides"); return me; }
+async function loadMe() { me = await api("/api/rides"); setLang(me.lang); return me; }
 
 function rideRow(r) {
   return `<button class="row" data-id="${r.id}">${icon(r.kind)}
     <span class="grow"><b>${fmtDate(r.started_at)}</b>${r.active ? '<span class="badge live">LIVE</span>' : ""}
-      <span class="meta">${KINDS[r.kind]} · ${fmtDuration(r.moving_s)} · ${speedOf(r)}</span></span>
-    <span class="km">${r.distance_km} км</span></button>`;
+      <span class="meta">${kinds()[r.kind]} · ${fmtDuration(r.moving_s)} · ${speedOf(r)}</span></span>
+    <span class="km">${r.distance_km} ${t("km")}</span></button>`;
 }
 document.addEventListener("click", (e) => {
   const row = e.target.closest(".row[data-id]");
@@ -348,10 +519,10 @@ const pickDefaultKind = (then) => async (kind) => { await post("/api/kind", { ki
 const summary = () => api(`/api/summary?tz=${new Date().getTimezoneOffset()}`);
 
 function periodHtml(totals) {
-  const kinds = Object.keys(KINDS).filter((k) => totals[k]);
-  return kinds.length ? kinds.map((k) => `<div class="row">${icon(k)}
-    <span class="grow">${KINDS[k]}<span class="meta">${plural(totals[k].count, "тренировка", "тренировки", "тренировок")} · ${fmtDuration(totals[k].moving_s)}</span></span>
-    <span class="km">${totals[k].distance_km} км</span></div>`).join("") : '<p class="hint">Пока ничего.</p>';
+  const names = kinds(), used = Object.keys(names).filter((k) => totals[k]);
+  return used.length ? used.map((k) => `<div class="row">${icon(k)}
+    <span class="grow">${names[k]}<span class="meta">${t("workouts", totals[k].count)} · ${fmtDuration(totals[k].moving_s)}</span></span>
+    <span class="km">${totals[k].distance_km} ${t("km")}</span></div>`).join("") : `<p class="hint">${t("nothing_yet")}</p>`;
 }
 
 async function showHome() {
@@ -359,24 +530,15 @@ async function showHome() {
   const [, sum] = await Promise.all([loadMe(), summary()]);
   const last = me.rides[0];
   $("active-card").innerHTML = last && last.active ? rideRow(last) : "";
-  $("last-ride").innerHTML = !last ? '<p class="hint">Пока пусто — самое время начать.</p>' : last.active ? "" : rideRow(last);
+  $("last-ride").innerHTML = !last ? `<p class="hint">${t("empty_home")}</p>` : last.active ? "" : rideRow(last);
   kindChips($("home-kinds"), me.kind, pickDefaultKind(showHome));
-  $("together").lastChild.textContent = me.session_id ? "Открыть совместную тренировку" : "Совместная тренировка";
-  $("streak").textContent = sum.streak_days || sum.streak_weeks
-    ? `Серия: ${plural(sum.streak_days, "день", "дня", "дней")} · ${plural(sum.streak_weeks, "неделя", "недели", "недель")} подряд`
-    : "";
+  $("together").lastChild.textContent = t(me.session_id ? "together_open" : "together");
+  $("streak").textContent = sum.streak_days || sum.streak_weeks ? t("streak", sum.streak_days, sum.streak_weeks) : "";
   $("week").innerHTML = periodHtml(sum.week);
   $("month").innerHTML = periodHtml(sum.month);
 }
 
-// ---------- онбординг: при первом запуске и по кнопке «Начать» ----------
-$("onb-steps").innerHTML = [
-  ["clip", "В чате с ботом нажми скрепку"],
-  ["pin", "Выбери «Геопозиция»"],
-  ["live", "Нажми «Транслировать геопозицию»"],
-  ["clock", "Выбери время с запасом"],
-  ["play", "Старт! Телефон можно убрать в карман"],
-].map(([i, text]) => `<li>${icon(i)}<span>${text}</span></li>`).join("");
+// ---------- онбординг: при первом запуске и по кнопке «Начать»; шаги рисует applyLang ----------
 function onboarding(open) {
   $("onboarding").classList.toggle("hidden", !open);
   if (!open) localStorage.setItem("onboarded", "1");
@@ -390,7 +552,7 @@ let lastStartedAt = null, historyKind = "";
 const ridesUrl = (before) => `/api/rides?${new URLSearchParams({ ...(historyKind && { kind: historyKind }), ...(before && { before }) })}`;
 function appendRides(data, reset) {
   const html = data.rides.map(rideRow).join("");
-  if (reset) $("rides").innerHTML = html || '<p class="hint">Тренировок пока нет.</p>';
+  if (reset) $("rides").innerHTML = html || `<p class="hint">${t("no_rides")}</p>`;
   else $("rides").insertAdjacentHTML("beforeend", html);
   if (data.rides.length) lastStartedAt = data.rides[data.rides.length - 1].started_at;
   $("more").classList.toggle("hidden", !data.has_more);
@@ -411,25 +573,25 @@ async function loadSos() {
   const sos = await api("/api/sos");
   sosInvite = sos.invite;
   $("sos-contacts").innerHTML = sos.contacts.map((c) => `<div class="rec-row"><span>${esc(c.name)}</span>
-    <button class="danger" data-contact="${c.id}" aria-label="Удалить контакт ${esc(c.name)}">Удалить</button></div>`).join("")
-    || '<p class="hint">Пока нет контактов.</p>';
+    <button class="danger" data-contact="${c.id}" aria-label="${t("remove_contact", esc(c.name))}">${t("remove")}</button></div>`).join("")
+    || `<p class="hint">${t("no_contacts")}</p>`;
 }
 $("sos-contacts").addEventListener("click", async (e) => {
   const b = e.target.closest("button[data-contact]");
-  if (!b || !(await confirmDialog("Удалить экстренный контакт?"))) return;
+  if (!b || !(await confirmDialog(t("confirm_remove_contact")))) return;
   try { await api(`/api/sos/${b.dataset.contact}`, { method: "DELETE" }); await loadSos(); } catch (err) { showError(err); }
 });
 $("sos-invite").addEventListener("click", () => {
-  const text = "Стань моим экстренным контактом: если я нажму SOS на тренировке, бот пришлёт тебе мою геопозицию.";
+  const text = t("sos_share_text");
   const url = `https://t.me/share/url?url=${encodeURIComponent(sosInvite)}&text=${encodeURIComponent(text)}`;
   tg ? tg.openTelegramLink(url) : window.open(url);
 });
 $("sos").addEventListener("click", async () => {
-  if (!(await confirmDialog("Отправить SOS экстренным контактам? Они получат твою последнюю геопозицию."))) return;
+  if (!(await confirmDialog(t("confirm_sos")))) return;
   try {
     const r = await post("/api/sos/send");
     haptic(r.sent ? "success" : "error");
-    const text = `SOS отправлен: ${r.sent} из ${r.total}.`;
+    const text = t("sos_sent", r.sent, r.total);
     tg ? tg.showAlert(text) : alert(text);
   } catch (e) { haptic("error"); showError(e); }
 });
@@ -438,11 +600,29 @@ async function showProfile() {
   show("profile");
   const [, sum] = await Promise.all([loadMe(), summary(), loadSos()]);
   $("weight").value = me.weight;
+  langChips();
   kindChips($("profile-kinds"), me.kind, pickDefaultKind(showProfile));
-  $("records").innerHTML = Object.keys(KINDS).filter((k) => sum.records[k]).map((k) =>
-    `<p class="hint">${KINDS[k]}</p>` + Object.entries(sum.records[k]).filter(([, v]) => v).map(([key, v]) =>
-      `<div class="rec-row"><span>${RECORDS[key][0]}</span><b>${RECORDS[key][1](v)}</b></div>`).join("")
-  ).join("") || '<p class="hint">Появятся после первых тренировок.</p>';
+  const names = kinds();
+  $("records").innerHTML = Object.keys(names).filter((k) => sum.records[k]).map((k) =>
+    `<p class="hint">${names[k]}</p>` + Object.entries(sum.records[k]).filter(([, v]) => v).map(([key, v]) =>
+      `<div class="rec-row"><span>${t(`rec_${key}`)}</span><b>${RECORDS[key](v)}</b></div>`).join("")
+  ).join("") || `<p class="hint">${t("records_empty")}</p>`;
+}
+// Язык: «Как в Telegram» или один из трёх; меняет и Mini App, и бота, и карточки.
+function langChips() {
+  const options = { "": t("lang_auto"), ru: "Русский", uk: "Українська", en: "English" };
+  const el = $("profile-lang");
+  el.innerHTML = Object.entries(options).map(([k, title]) =>
+    `<button data-lang="${k}" aria-pressed="${k === (me.lang_choice || "")}" lang="${k || lang}">${title}</button>`).join("");
+  el.onclick = async (e) => {
+    const b = e.target.closest("button");
+    if (!b || b.getAttribute("aria-pressed") === "true") return;
+    if (tg) tg.HapticFeedback.selectionChanged();
+    try {
+      setLang((await post("/api/lang", { lang: b.dataset.lang || null })).lang);
+      await showProfile();
+    } catch (err) { showError(err); }
+  };
 }
 $("save-weight").addEventListener("click", async () => {
   try { await post("/api/weight", { weight: Number($("weight").value) }); haptic("success"); } catch (e) { showError(e); }
@@ -450,7 +630,7 @@ $("save-weight").addEventListener("click", async () => {
 $("privacy-link").addEventListener("click", (e) => {
   if (!tg) return;
   e.preventDefault();
-  tg.openLink(new URL("/privacy", location.href).href); // встроенный браузер, без выхода из Mini App
+  tg.openLink(new URL(`/privacy?lang=${lang}`, location.href).href); // встроенный браузер, без выхода из Mini App
 });
 
 // ---------- тренировка: идёт — крупные цифры, завершена — итоги ----------
@@ -484,38 +664,38 @@ async function renderRide(id, fitView) {
     await renderRide(id, false);
   });
   $("ride-title").innerHTML = fmtDate(ride.started_at) + (ride.active ? '<span class="badge live">LIVE</span>' : "");
-  const fast = [`${ride.avg_speed_kmh}`, "ср. км/ч", `${ride.max_speed_kmh}`, "макс. км/ч"];
+  const fast = [`${ride.avg_speed_kmh}`, t("avg_kmh"), `${ride.max_speed_kmh}`, t("max_kmh")];
 
   $("map").classList.toggle("small", ride.active);
   $("ride-live").innerHTML = ride.active ? `<div class="big">
-      <div class="num">${fmtDuration(ride.moving_s)}</div><div class="label">в движении</div>
-      <div class="pair"><div><div class="num">${ride.distance_km}</div><div class="label">км</div></div>
+      <div class="num">${fmtDuration(ride.moving_s)}</div><div class="label">${t("moving")}</div>
+      <div class="pair"><div><div class="num">${ride.distance_km}</div><div class="label">${t("km")}</div></div>
         <div><div class="num">${fast[0]}</div><div class="label">${fast[1]}</div></div></div></div>` : "";
   $("ride-actions").classList.toggle("hidden", ride.active);
   $("sos").classList.toggle("hidden", !ride.active);
   $("delete").classList.toggle("hidden", ride.active);
   shareRideId = ride.id;
   $("ride-records").innerHTML = ride.records.map((key) =>
-    `<div class="record">${icon("trophy")}Новый рекорд: ${RECORDS[key][0].toLowerCase()}</div>`).join("");
+    `<div class="record">${icon("trophy")}${t("new_record", t(`rec_${key}`))}</div>`).join("");
   if (fitView && ride.records.length) haptic("success");
   $("ride-stats").innerHTML = ride.active ? "" :
-    tile(ride.distance_km, "км") + tile(fmtDuration(ride.moving_s), "в движении") + tile(fmtDuration(ride.duration_s), "всего") +
-    tile(fast[0], fast[1]) + tile(fast[2], fast[3]) + tile(`≈ ${ride.kcal}`, "ккал") +
-    (ride.elevation_gain_m != null ? tile(ride.elevation_gain_m, "м набора высоты") : "");
+    tile(ride.distance_km, t("km")) + tile(fmtDuration(ride.moving_s), t("moving")) + tile(fmtDuration(ride.duration_s), t("total")) +
+    tile(fast[0], fast[1]) + tile(fast[2], fast[3]) + tile(`≈ ${ride.kcal}`, t("kcal")) +
+    (ride.elevation_gain_m != null ? tile(ride.elevation_gain_m, t("elevation")) : "");
 
   const best = Math.min(...ride.splits);
-  $("splits").innerHTML = ride.kind !== "ride" && ride.splits.length ? "<h2>Сплиты</h2>" + ride.splits.map((s, i) =>
-    `<div class="split"><span class="km">${i + 1} км</span><span class="bar"><i style="width:${Math.round(best / s * 100)}%"></i></span>
+  $("splits").innerHTML = ride.kind !== "ride" && ride.splits.length ? `<h2>${t("splits")}</h2>` + ride.splits.map((s, i) =>
+    `<div class="split"><span class="km">${i + 1} ${t("km")}</span><span class="bar"><i style="width:${Math.round(best / s * 100)}%"></i></span>
       <span class="t">${fmtDuration(s)}</span></div>`).join("") : "";
-  $("ride-hint").textContent = ride.active ? "Тренировка идёт — данные обновляются каждые 15 секунд." : `Точек маршрута: ${points.length}`;
+  $("ride-hint").textContent = ride.active ? t("live_hint") : t("points", points.length);
 
   map.invalidateSize(); // карта была в скрытом блоке или поменяла высоту
   routeLayer.clearLayers();
   if (!points.length) { map.setView([52.23, 21.01], 12); return; }
   const latlngs = points.map((p) => [p[0], p[1]]);
   drawLine(routeLayer, latlngs, "#C6F432");
-  dot(routeLayer, latlngs[0], "#FFFFFF", "Старт");
-  dot(routeLayer, latlngs[latlngs.length - 1], "#C6F432", ride.active ? "Сейчас" : "Финиш");
+  dot(routeLayer, latlngs[0], "#FFFFFF", t("start_dot"));
+  dot(routeLayer, latlngs[latlngs.length - 1], "#C6F432", t(ride.active ? "now" : "finish"));
   if (fitView) latlngs.length > 1 ? map.fitBounds(latlngs, { padding: [24, 24] }) : map.setView(latlngs[0], 15);
 }
 
@@ -539,11 +719,11 @@ async function renderSession(id, fitView) {
   let other = 0;
   const people = data.participants.map((p) => ({ ...p, color: p.you ? "#C6F432" : COLORS[other++ % COLORS.length] }));
   const total = people.reduce((sum, p) => sum + (p.ride ? p.ride.distance_km : 0), 0);
-  $("session-people").innerHTML = `<h2>Вместе: ${total.toFixed(2)} км</h2>` + people.map((p) => `<div class="row">
+  $("session-people").innerHTML = `<h2>${t("together_total", total.toFixed(2))}</h2>` + people.map((p) => `<div class="row">
       <span class="swatch" style="background:${p.color}"></span>
-      <span class="grow">${esc(p.name)}${p.you ? " (ты)" : ""}${p.ride && p.ride.active ? '<span class="badge live">LIVE</span>' : ""}
-        <span class="meta">${p.ride ? `${KINDS[p.ride.kind]} · ${fmtDuration(p.ride.moving_s)} · ${speedOf(p.ride)}` : "ещё не начал(а) трансляцию"}</span></span>
-      <span class="km">${p.ride ? p.ride.distance_km : 0} км</span></div>`).join("");
+      <span class="grow">${esc(p.name)}${p.you ? t("you") : ""}${p.ride && p.ride.active ? '<span class="badge live">LIVE</span>' : ""}
+        <span class="meta">${p.ride ? `${kinds()[p.ride.kind]} · ${fmtDuration(p.ride.moving_s)} · ${speedOf(p.ride)}` : t("not_started")}</span></span>
+      <span class="km">${p.ride ? p.ride.distance_km : 0} ${t("km")}</span></div>`).join("");
 
   sessionMap.invalidateSize();
   sessionLayer.clearLayers();
@@ -558,14 +738,14 @@ async function renderSession(id, fitView) {
 }
 
 function invite() {
-  const text = "Тренируемся вместе: открой ссылку и запусти трансляцию геопозиции в чате с ботом.";
+  const text = t("invite_text");
   const url = `https://t.me/share/url?url=${encodeURIComponent(sessionLink)}&text=${encodeURIComponent(text)}`;
   tg ? tg.openTelegramLink(url) : window.open(url);
 }
 $("invite").addEventListener("click", invite);
 let sessionId = null;
 $("leave").addEventListener("click", async () => {
-  if (!(await confirmDialog("Покинуть совместную тренировку? Если в ней больше никого нет, она распустится, а ссылка перестанет работать."))) return;
+  if (!(await confirmDialog(t("confirm_leave")))) return;
   try {
     await post(`/api/sessions/${sessionId}/leave`);
     haptic("warning");
@@ -589,7 +769,7 @@ $("share").addEventListener("click", async () => {
   try {
     const { prepared_id } = await post(`/api/rides/${shareRideId}/share`);
     if (prepared_id && tg && tg.isVersionAtLeast("8.0")) tg.shareMessage(prepared_id, (sent) => sent && haptic("success"));
-    else if (tg) tg.showAlert("Карточка в чате с ботом — перешли её друзьям.");
+    else if (tg) tg.showAlert(t("card_in_chat"));
   } catch (e) { showError(e); }
   $("share").disabled = false;
 });
@@ -600,14 +780,14 @@ $("story").addEventListener("click", async () => {
   try {
     await post(`/api/rides/${shareRideId}/story?tz=${new Date().getTimezoneOffset()}`);
     haptic("success");
-    const text = "Карточка в чате с ботом: открой её, сохрани в галерею и добавь в историю Instagram.";
+    const text = t("story_in_chat");
     tg ? tg.showAlert(text) : alert(text);
   } catch (e) { showError(e); }
   $("story").disabled = false;
 });
 
 $("delete").addEventListener("click", async () => {
-  if (!(await confirmDialog("Удалить тренировку? Отменить это нельзя."))) return;
+  if (!(await confirmDialog(t("confirm_delete_ride")))) return;
   try {
     await api(`/api/rides/${shareRideId}`, { method: "DELETE" });
     haptic("warning");
@@ -624,23 +804,24 @@ let finishRideId = null;
 function setFinish(ride) {
   finishRideId = ride && ride.active ? ride.id : null;
   if (!tg) return;
-  if (finishRideId) tg.MainButton.setText("Финиш").show(); else tg.MainButton.hide();
+  if (finishRideId) tg.MainButton.setText(t("finish")).show(); else tg.MainButton.hide();
 }
 if (tg) tg.MainButton.onClick(() => {
   const id = finishRideId;
-  tg.showConfirm("Завершить тренировку?", async (ok) => {
+  tg.showConfirm(t("confirm_finish"), async (ok) => {
     if (!ok || !id) return;
     try {
       await post(`/api/rides/${id}/finish`);
       haptic("success");
       await renderRide(id, true);
       // Бот не может выключить трансляцию пользователя — только напомнить.
-      tg.showAlert("Тренировка завершена. Трансляция геопозиции ещё идёт: останови её в чате с ботом — крестик на плашке трансляции вверху чата.");
+      tg.showAlert(t("finished_live"));
     } catch (e) { showError(e); }
   });
 });
 
 // ---------- старт: ?ride=ID — сразу эта тренировка; идущая открывается сама ----------
+applyLang();
 (async () => {
   const rideParam = new URLSearchParams(location.search).get("ride");
   if (rideParam) return showRide(rideParam);
