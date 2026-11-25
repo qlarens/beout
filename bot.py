@@ -1020,7 +1020,8 @@ async def api_set_weight(request):
 
 
 async def index(_request):
-    return web.FileResponse(WEBAPP_DIR / "index.html")
+    # Без no-cache Telegram держит старую Mini App после выкладки; так он сверяет ETag при каждом открытии.
+    return web.FileResponse(WEBAPP_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 async def privacy(request):

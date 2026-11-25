@@ -573,6 +573,11 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         headers = {**({"X-Init-Data": init_data(user_id)} if user_id else {}), **(headers or {})}
         return await self.client.request(method, path, headers=headers, **kwargs)
 
+    async def test_mini_app_not_cached(self):
+        """Иначе после выкладки Telegram показывает старую Mini App."""
+        res = await self.call("GET", "/")
+        self.assertEqual(res.headers["Cache-Control"], "no-cache")
+
     async def test_requires_signature(self):
         self.assertEqual((await self.call("GET", "/api/rides")).status, 401)
 
