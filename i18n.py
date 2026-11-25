@@ -260,6 +260,18 @@ TEXTS = {
         "uk": "{name} тепер твій екстрений контакт. Список і видалення — у профілі Mini App.",
         "en": "{name} is now your emergency contact. See or remove contacts in the Mini App profile.",
     },
+    "ref_notice": {
+        "ru": "🎉 {name} присоединяется к {app} по твоей ссылке. Приглашено друзей: {n}. Список — в профиле Mini App.",
+        "uk": "🎉 {name} приєднується до {app} за твоїм посиланням. Запрошено друзів: {n}. Список — у профілі Mini App.",
+        "en": "🎉 {name} joined {app} via your link. Friends invited: {n}. See the list in the Mini App profile.",
+    },
+    "invites_title": {
+        "ru": "Пользователей: {users}, по приглашению: {invited}.\n",
+        "uk": "Користувачів: {users}, за запрошенням: {invited}.\n",
+        "en": "Users: {users}, invited: {invited}.\n",
+    },
+    "invites_none": {"ru": "Пока никто никого не пригласил.", "uk": "Поки ніхто нікого не запросив.",
+                     "en": "Nobody has invited anyone yet."},
     "sos_alert": {
         "ru": "🆘 SOS от {name} во время тренировки.\n"
               "Последняя геопозиция — ниже, получена {min} мин назад.\n"

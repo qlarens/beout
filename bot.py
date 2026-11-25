@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 from html import escape
 import os
 import time
@@ -71,7 +72,7 @@ ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 # Только для локальной отладки в обычном браузере, без Telegram. В проде не задавать!
 DEV_USER_ID = os.environ.get("DEV_USER_ID")
 # Поменял webapp/privacy.html — увеличь: бот попросит всех принять условия заново.
-POLICY_VERSION = 4
+POLICY_VERSION = 5
 PAGE_SIZE = 50
 NETWORK_RETRY_S = 10
 FLOOD_MAX_WAIT_S = 600
@@ -174,8 +175,10 @@ def policy_keyboard(lang, *extra_rows):
     return InlineKeyboardMarkup(inline_keyboard=[[button], *extra_rows])
 
 
-def consent_keyboard(lang):
-    return policy_keyboard(lang, [InlineKeyboardButton(text=t(lang, "btn_accept"), callback_data="consent")])
+def consent_keyboard(lang, ref=None):
+    """ref — «ref_<token>» из реферальной ссылки: едет в кнопке, чтобы до согласия ничего не хранить."""
+    data = f"consent:{ref}" if ref else "consent"
+    return policy_keyboard(lang, [InlineKeyboardButton(text=t(lang, "btn_accept"), callback_data=data)])
 
 
 def welcome_text(user_id, lang):
@@ -330,7 +333,8 @@ async def cmd_start(message: Message, command: CommandObject):
         await sos_invitation(message, command.args.removeprefix("sos_"), lang)
         return
     if not has_consent(message.from_user.id):
-        await message.answer(t(lang, "consent"), reply_markup=consent_keyboard(lang))
+        ref = command.args if command.args and REF_ARG.match(command.args) else None
+        await message.answer(t(lang, "consent"), reply_markup=consent_keyboard(lang, ref))
         return
     await set_user_menu(message.bot, message.from_user.id, lang)
     await message.answer(
@@ -395,9 +399,10 @@ async def on_sos_contact(callback: CallbackQuery):
         logging.warning("Не удалось сообщить %s о новом контакте", owner)
 
 
-@dp.callback_query(F.data == "consent")
+@dp.callback_query(F.data.regexp(r"^consent(:ref_[\w-]{1,40})?$"))
 async def on_consent(callback: CallbackQuery):
     user_id = callback.from_user.id
+    newcomer = db.consent_version(user_id) == 0  # приглашением считается только первое согласие
     db.set_consent(user_id, POLICY_VERSION)
     lang = lang_of(callback.from_user)  # после согласия: язык Telegram запоминается
     await reply_in_place(callback, f"{t(lang, 'consent')}\n\n{t(lang, 'consent_accepted')}", policy_keyboard(lang))
@@ -406,6 +411,47 @@ async def on_consent(callback: CallbackQuery):
         user_id, welcome_text(user_id, lang), parse_mode="HTML",
         reply_markup=open_app_keyboard(None, t(lang, "btn_open")),
     )
+    if newcomer and callback.data.startswith("consent:ref_"):
+        await count_referral(callback.bot, user_id, callback.data.removeprefix("consent:ref_"))
+
+
+# ---------- реферальные ссылки: «пригласить друзей» ----------
+# t.me/<bot>?start=ref_<token>. Засчитывается, когда новый пользователь принял условия.
+
+REF_ARG = re.compile(r"^ref_[\w-]{1,40}$")
+
+
+async def count_referral(bot, user_id, token):
+    inviter = db.user_by_ref_token(token)
+    if not inviter or not db.add_referral(user_id, inviter):
+        return
+    lang = db.user_lang(inviter)
+    name = await user_name(bot, user_id, lang)
+    text = t(lang, "ref_notice", name=name, n=len(db.referrals(inviter)), app=APP_NAME)
+    try:
+        await bot.send_message(inviter, text)
+    except TelegramAPIError:
+        logging.warning("Не удалось сообщить %s о приглашённом", inviter)
+
+
+def is_admin(message):
+    return bool(ADMIN_CHAT_ID) and str(message.chat.id) == ADMIN_CHAT_ID.strip()
+
+
+@private.message(Command("invites"))
+async def cmd_invites(message: Message):
+    """Только для владельца бота (ADMIN_CHAT_ID): кто сколько и кого пригласил."""
+    if not is_admin(message):
+        return
+    lang = lang_of(message.from_user)
+    totals = db.referral_totals()
+    lines = [t(lang, "invites_title", users=db.users_count(), invited=sum(n for _, n in totals))]
+    for i, (inviter, n) in enumerate(totals, 1):
+        names = [await user_name(message.bot, r["user_id"], lang) for r in db.referrals(inviter)]
+        lines.append(f"{i}. {await user_name(message.bot, inviter, lang)} — {n}: {', '.join(reversed(names))}")
+    if not totals:
+        lines.append(t(lang, "invites_none"))
+    await message.answer("\n".join(lines)[:4000])
 
 
 @private.message(Command("privacy"))
@@ -847,6 +893,18 @@ async def api_sos(request):
     })
 
 
+async def api_referrals(request):
+    """Своя реферальная ссылка и кого по ней пригласил — новые сверху."""
+    user_id = current_user_id(request)
+    bot, lang = request.app[BOT_KEY], db.user_lang(user_id)
+    return web.json_response({
+        "link": f"https://t.me/{(await bot.me()).username}?start=ref_{db.ref_token(user_id)}",
+        "invited": [
+            {"name": await user_name(bot, r["user_id"], lang), "at": r["created_at"]} for r in db.referrals(user_id)
+        ],
+    })
+
+
 async def api_sos_remove(request):
     db.set_sos_contact(current_user_id(request), int(request.match_info["contact_id"]), False)
     return web.json_response({"removed": True})
@@ -990,6 +1048,7 @@ def make_web_app(bot):
     app.router.add_get("/api/sessions/{session_id:\\d+}", api_session)
     app.router.add_post("/api/sessions/{session_id:\\d+}/leave", api_leave_session)
     app.router.add_get("/api/sos", api_sos)
+    app.router.add_get("/api/referrals", api_referrals)
     app.router.add_post("/api/sos/send", api_sos_send)
     app.router.add_delete("/api/sos/{contact_id:\\d+}", api_sos_remove)
     app.router.add_post("/api/rides/{ride_id:\\d+}/finish", api_finish)

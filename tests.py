@@ -244,7 +244,7 @@ class StorageTest(unittest.TestCase):
         self.assertEqual(self.db.consent_version(1), 0)
         self.assertEqual(self.db.export_user(1), {
             "user": {"user_id": 1}, "rides": [], "sessions": [], "rating_groups": [],
-            "sos_contacts": [], "sos_contact_for": [],
+            "sos_contacts": [], "sos_contact_for": [], "invited_by": None, "invited": [],
         })
         self.assertEqual(len(self.db.get_points(other)), 10)
 
@@ -272,6 +272,25 @@ class StorageTest(unittest.TestCase):
         self.assertEqual(self.db.export_user(2)["sos_contact_for"], [{"user_id": 1, "lang": None}])
         self.db.delete_user(2)  # контакт удалил свои данные
         self.assertEqual(self.db.sos_contacts(1), [])
+
+    def test_referrals(self):
+        token = self.db.ref_token(1)
+        self.assertEqual(self.db.ref_token(1), token)  # ссылка постоянная
+        self.assertEqual(self.db.user_by_ref_token(token), 1)
+        self.assertFalse(self.db.add_referral(1, 1))  # сам себя не приглашает
+        self.assertTrue(self.db.add_referral(2, 1))
+        self.assertTrue(self.db.add_referral(3, 1))
+        self.assertFalse(self.db.add_referral(3, 4))  # пригласивший у каждого один
+        self.assertTrue(self.db.add_referral(5, 4))
+        self.assertEqual([r["user_id"] for r in self.db.referrals(1)], [3, 2])  # новые сверху
+        self.assertEqual(self.db.referral_totals(), [(1, 2), (4, 1)])
+        self.assertEqual(self.db.export_user(3)["invited_by"], 1)
+        self.assertEqual(len(self.db.export_user(1)["invited"]), 2)
+        self.db.delete_user(2)  # приглашённый удалил данные — из списка пропал
+        self.assertEqual([r["user_id"] for r in self.db.referrals(1)], [3])
+        self.db.delete_user(1)  # пригласивший удалил данные — связи тоже
+        self.assertIsNone(self.db.inviter(3))
+        self.assertIsNone(self.db.user_by_ref_token(token))
 
     def test_session_links_rides(self):
         now = 1_000_000.0
@@ -685,6 +704,15 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone((await (await self.call("GET", "/api/rides", user_id)).json())["session_id"])
         self.assertIsNone(bot.db.get_session(created["id"]))  # ушли все — распущена
 
+    async def test_referrals(self):
+        self.consent(1)
+        ref = await (await self.call("GET", "/api/referrals", 1)).json()
+        self.assertEqual(ref["invited"], [])
+        self.assertTrue(ref["link"].startswith("https://t.me/beout_bot?start=ref_"))
+        bot.db.add_referral(2, 1)
+        ref = await (await self.call("GET", "/api/referrals", 1)).json()
+        self.assertEqual([f["name"] for f in ref["invited"]], ["User2"])
+
     async def test_sos(self):
         self.consent(1)
         invite = (await (await self.call("GET", "/api/sos", 1)).json())["invite"]
@@ -873,6 +901,53 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         leave.from_user = SimpleNamespace(language_code="ru", id=2)
         await bot.on_sos_contact(leave)
         self.assertEqual(bot.db.sos_contacts(1), [])
+
+    async def test_referral_link(self):
+        token = bot.db.ref_token(1)
+        bot.db.set_consent(1, bot.POLICY_VERSION)
+        bot.db.remember_tg_lang(1, "ru")  # уведомление придёт пригласившему на его языке
+
+        def start(user_id, args):
+            msg = SimpleNamespace(from_user=SimpleNamespace(language_code="ru", id=user_id), bot=self.tg, answer=AsyncMock())
+            return msg, SimpleNamespace(args=args)
+
+        def accept(user_id, data):
+            cb = self.callback(data)
+            cb.from_user = SimpleNamespace(language_code="ru", id=user_id)
+            return cb
+
+        friend, command = start(2, f"ref_{token}")
+        await bot.cmd_start(friend, command)
+        data = friend.answer.call_args.kwargs["reply_markup"].inline_keyboard[-1][0].callback_data
+        self.assertEqual(data, f"consent:ref_{token}")
+        self.assertEqual(bot.db.referrals(1), [])  # до согласия ничего не храним
+        self.tg.send_message.reset_mock()
+        await bot.on_consent(accept(2, data))
+        self.assertEqual([r["user_id"] for r in bot.db.referrals(1)], [2])
+        self.assertIn("User2 присоединяется", self.tg.send_message.call_args.args[1])
+        self.assertEqual(self.tg.send_message.call_args.args[0], 1)
+
+        await bot.on_consent(accept(2, data))  # повторное нажатие — не второй раз
+        self.assertEqual(len(bot.db.referrals(1)), 1)
+
+        bot.db.set_consent(3, bot.POLICY_VERSION - 1)  # старый пользователь принимает новые условия
+        await bot.on_consent(accept(3, data))
+        self.assertEqual(len(bot.db.referrals(1)), 1)
+
+        await bot.on_consent(accept(1, data))  # своя ссылка
+        await bot.on_consent(accept(4, "consent:ref_unknown"))
+        self.assertEqual(bot.db.referral_totals(), [(1, 1)])
+
+    async def test_invites_only_for_admin(self):
+        bot.db.add_referral(2, 1)
+        msg = SimpleNamespace(from_user=SimpleNamespace(language_code="ru", id=5), chat=SimpleNamespace(id=5),
+                              bot=self.tg, answer=AsyncMock())
+        with patch.object(bot, "ADMIN_CHAT_ID", "7"):
+            await bot.cmd_invites(msg)
+            msg.answer.assert_not_called()
+            msg.chat.id = msg.from_user.id = 7
+            await bot.cmd_invites(msg)
+        self.assertIn("1. User1 — 1: User2", msg.answer.call_args.args[0])
 
     async def test_personal_commands_only_in_private_chat(self):
         """/export в группе выложил бы личные данные всем участникам."""
