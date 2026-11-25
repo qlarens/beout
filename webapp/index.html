@@ -116,6 +116,7 @@
   nav {
     position: fixed; left: 0; right: 0; bottom: 0; display: flex; z-index: 500;
     background: var(--bg); border-top: 1px solid var(--card);
+    border-top-color: color-mix(in srgb, var(--hint) 30%, transparent); /* заметнее, где браузер умеет */
     padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
   }
   nav button { flex: 1; flex-direction: column; gap: 2px; background: none; color: var(--hint); font-size: 11px; padding: 4px; }
@@ -128,7 +129,8 @@
   .rec-row b { font-family: "Inter Display", "Inter", sans-serif; }
 
   /* Версия — над полосой панели вкладок: всегда на одном месте, не зависит от длины экрана. */
-  nav .version { position: absolute; left: 0; right: 0; bottom: 100%; margin: 0; padding: 2px 0;
+  /* bottom считается от внутреннего края панели: +1px — чтобы не закрыть её верхнюю линию. */
+  nav .version { position: absolute; left: 0; right: 0; bottom: calc(100% + 1px); margin: 0; padding: 2px 0;
                  background: var(--bg); text-align: center; font-size: 10px; line-height: 12px; }
   nav .version::before { content: attr(data-v); color: var(--hint); opacity: .6; }
   .sheet { position: fixed; inset: 0; background: var(--bg); padding: 24px 16px; overflow: auto; z-index: 1000; }
