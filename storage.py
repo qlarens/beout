@@ -52,6 +52,12 @@ CREATE TABLE IF NOT EXISTS sos_contacts (  -- contact_id сам согласил
     contact_id INTEGER NOT NULL,
     PRIMARY KEY (user_id, contact_id)
 );
+CREATE TABLE IF NOT EXISTS referrals (  -- user_id впервые принял условия по ссылке inviter_id
+    user_id    INTEGER PRIMARY KEY,
+    inviter_id INTEGER NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS referrals_by_inviter ON referrals(inviter_id, created_at);
 CREATE TABLE IF NOT EXISTS group_members (  -- согласились участвовать в рейтинге группы
     chat_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
@@ -75,6 +81,7 @@ NEW_COLUMNS = {
         "consent_at REAL", "consent_version INTEGER NOT NULL DEFAULT 0", "kind TEXT",
         "sos_token TEXT",  # из ссылки-приглашения экстренного контакта
         "lang TEXT",  # язык, выбранный в профиле; NULL — как в Telegram
+        "ref_token TEXT",  # из реферальной ссылки «пригласить друзей»; постоянный
         "tg_lang TEXT",  # язык Telegram (ru/uk/en) — для сообщений без апдейта: итог по таймеру, SOS
     ),
     "groups": ("lang TEXT",),  # язык того, кто вызвал /top, — для автопоста рейтинга
@@ -165,6 +172,10 @@ class Storage:
         ).fetchone()
         return row["consent_version"] if row else 0
 
+    def users_count(self):
+        """Сколько человек приняли условия."""
+        return self.conn.execute("SELECT COUNT(*) FROM users WHERE consent_version > 0").fetchone()[0]
+
     def set_consent(self, user_id, version):
         with self.conn:
             self.conn.execute(
@@ -193,6 +204,7 @@ class Storage:
             self.conn.execute(
                 "DELETE FROM sos_contacts WHERE user_id = ? OR contact_id = ?", (user_id, user_id)
             )
+            self.conn.execute("DELETE FROM referrals WHERE user_id = ? OR inviter_id = ?", (user_id, user_id))
 
     def export_user(self, user_id):
         """Все данные пользователя одним словарём — для выгрузки по /export."""
@@ -220,7 +232,50 @@ class Storage:
             "sos_contact_for": [dict(r) for r in self.conn.execute(
                 "SELECT user_id, lang FROM sos_contacts WHERE contact_id = ?", (user_id,)
             )],
+            "invited_by": self.inviter(user_id),
+            "invited": [dict(r) for r in self.referrals(user_id)],
         }
+
+    # --- реферальные ссылки ---
+    def ref_token(self, user_id):
+        """Секрет для ссылки «пригласить друзей»; создаётся при первом запросе и не меняется."""
+        row = self.conn.execute("SELECT ref_token FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        if row and row["ref_token"]:
+            return row["ref_token"]
+        token = secrets.token_urlsafe(12)
+        self._set_user(user_id, "ref_token", token)
+        return token
+
+    def user_by_ref_token(self, token):
+        row = self.conn.execute("SELECT user_id FROM users WHERE ref_token = ?", (token,)).fetchone()
+        return row and row["user_id"]
+
+    def add_referral(self, user_id, inviter_id):
+        """Засчитывает приглашение; у пользователя может быть только один пригласивший."""
+        if user_id == inviter_id:
+            return False
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO referrals(user_id, inviter_id, created_at) VALUES (?, ?, ?)",
+                (user_id, inviter_id, time.time()),
+            )
+        return cur.rowcount == 1
+
+    def inviter(self, user_id):
+        row = self.conn.execute("SELECT inviter_id FROM referrals WHERE user_id = ?", (user_id,)).fetchone()
+        return row and row["inviter_id"]
+
+    def referrals(self, inviter_id):
+        """Кого пригласил пользователь, новые сверху."""
+        return self.conn.execute(
+            "SELECT user_id, created_at FROM referrals WHERE inviter_id = ? ORDER BY created_at DESC", (inviter_id,)
+        ).fetchall()
+
+    def referral_totals(self):
+        """Все пригласившие: (inviter_id, сколько), больше — выше."""
+        return [tuple(r) for r in self.conn.execute(
+            "SELECT inviter_id, COUNT(*) AS n FROM referrals GROUP BY inviter_id ORDER BY n DESC, MIN(created_at)"
+        )]
 
     # --- SOS ---
     def sos_token(self, user_id):

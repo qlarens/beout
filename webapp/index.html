@@ -171,6 +171,11 @@
   <div id="sos-contacts"></div>
   <p></p>
   <button class="wide" id="sos-invite" data-t="sos_invite"></button>
+  <h2><span data-t="ref_title"></span> <span class="hint" id="ref-count"></span></h2>
+  <p class="hint" data-t="ref_hint"></p>
+  <div id="ref-list"></div>
+  <p></p>
+  <button class="wide" id="ref-invite" data-t="ref_invite"></button>
   <h2 data-t="my_data"></h2>
   <p class="hint"><span data-t="data_hint"></span><br>
     <a href="/privacy" id="privacy-link" data-t="privacy_link"></a></p>
@@ -247,6 +252,9 @@ const I18N = {
     sos_title: "Экстренные контакты (SOS)",
     sos_hint: "Контакт сам открывает ссылку и соглашается. Кнопка SOS — на экране идущей тренировки: контакты получат твою последнюю геопозицию. Это не вызов экстренных служб — в опасности звони 112.",
     sos_invite: "Пригласить контакт", my_data: "Мои данные",
+    ref_title: "Пригласить друзей", ref_invite: "Отправить ссылку другу", no_invited: "Пока никто не пришёл по твоей ссылке.",
+    ref_hint: "Друг, который впервые запустит бота по твоей ссылке и примет условия, появится здесь.",
+    ref_share_text: "Записываю тренировки в Be. Out! прямо в Telegram — присоединяйся:",
     data_hint: "Выгрузить все данные — /export, удалить всё — /delete в чате с ботом.",
     privacy_link: "Условия и политика конфиденциальности",
     sos_button: "SOS — экстренным контактам", share: "Поделиться карточкой", story: "Карточка для Instagram",
@@ -294,6 +302,9 @@ const I18N = {
     sos_title: "Екстрені контакти (SOS)",
     sos_hint: "Контакт сам відкриває посилання й погоджується. Кнопка SOS — на екрані поточного тренування: контакти отримають твою останню геопозицію. Це не виклик екстрених служб — у небезпеці телефонуй 112.",
     sos_invite: "Запросити контакт", my_data: "Мої дані",
+    ref_title: "Запросити друзів", ref_invite: "Надіслати посилання другу", no_invited: "Поки ніхто не прийшов за твоїм посиланням.",
+    ref_hint: "Друг, який уперше запустить бота за твоїм посиланням і прийме умови, з'явиться тут.",
+    ref_share_text: "Записую тренування в Be. Out! просто в Telegram — приєднуйся:",
     data_hint: "Вивантажити всі дані — /export, видалити все — /delete у чаті з ботом.",
     privacy_link: "Умови та політика конфіденційності",
     sos_button: "SOS — екстреним контактам", share: "Поділитися карткою", story: "Картка для Instagram",
@@ -341,6 +352,9 @@ const I18N = {
     sos_title: "Emergency contacts (SOS)",
     sos_hint: "A contact opens the link and agrees themselves. The SOS button is on the screen of an ongoing workout: your contacts get your last location. It doesn't call emergency services — if you're in danger, call 112.",
     sos_invite: "Invite a contact", my_data: "My data",
+    ref_title: "Invite friends", ref_invite: "Send the link to a friend", no_invited: "Nobody has joined via your link yet.",
+    ref_hint: "A friend who starts the bot for the first time via your link and accepts the terms shows up here.",
+    ref_share_text: "I track my workouts with Be. Out! right in Telegram. Join me:",
     data_hint: "Export all data with /export, delete everything with /delete in the chat with the bot.",
     privacy_link: "Terms and privacy policy",
     sos_button: "SOS to emergency contacts", share: "Share card", story: "Instagram card",
@@ -586,6 +600,20 @@ $("sos-invite").addEventListener("click", () => {
   const url = `https://t.me/share/url?url=${encodeURIComponent(sosInvite)}&text=${encodeURIComponent(text)}`;
   tg ? tg.openTelegramLink(url) : window.open(url);
 });
+// Реферальная ссылка постоянная; друг засчитывается, когда впервые примет условия.
+let refLink = null;
+async function loadReferrals() {
+  const ref = await api("/api/referrals");
+  refLink = ref.link;
+  $("ref-count").textContent = ref.invited.length ? `· ${ref.invited.length}` : "";
+  $("ref-list").innerHTML = ref.invited.map((f) => `<div class="rec-row"><span>${esc(f.name)}</span>
+    <span class="hint">${fmtDate(f.at)}</span></div>`).join("")
+    || `<p class="hint">${t("no_invited")}</p>`;
+}
+$("ref-invite").addEventListener("click", () => {
+  const url = `https://t.me/share/url?url=${encodeURIComponent(refLink)}&text=${encodeURIComponent(t("ref_share_text"))}`;
+  tg ? tg.openTelegramLink(url) : window.open(url);
+});
 $("sos").addEventListener("click", async () => {
   if (!(await confirmDialog(t("confirm_sos")))) return;
   try {
@@ -598,7 +626,7 @@ $("sos").addEventListener("click", async () => {
 
 async function showProfile() {
   show("profile");
-  const [, sum] = await Promise.all([loadMe(), summary(), loadSos()]);
+  const [, sum] = await Promise.all([loadMe(), summary(), loadSos(), loadReferrals()]);
   $("weight").value = me.weight;
   langChips();
   kindChips($("profile-kinds"), me.kind, pickDefaultKind(showProfile));
