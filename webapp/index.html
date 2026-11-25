@@ -220,7 +220,7 @@
   </div>
   <p class="hint" data-t="weight_hint"></p>
   <h2 data-t="language"></h2>
-  <div class="chips wrap" id="profile-lang" role="group" data-t-aria="language"></div>
+  <div class="chips" id="profile-lang" role="group" data-t-aria="language"></div>
   <h2 data-t="default_kind"></h2>
   <div class="chips kinds" id="profile-kinds" role="group" data-t-aria="default_kind"></div>
   <h2 data-t="records"></h2>
@@ -354,7 +354,7 @@ const I18N = {
     history: "История", more: "Показать ещё", profile: "Профиль", tab_home: "Главная",
     weight: "Вес", kg: "кг", save: "Сохранить",
     weight_hint: "Нужен для оценки калорий по методу MET: это примерная оценка, а не медицинский расчёт.",
-    language: "Язык", lang_auto: "Как в Telegram", records: "Личные рекорды",
+    language: "Язык", records: "Личные рекорды",
     sos_title: "Экстренные контакты (SOS)",
     sos_hint: "Контакт сам открывает ссылку и соглашается. Кнопка SOS — на экране идущей тренировки: контакты получат твою последнюю геопозицию. Это не вызов экстренных служб — в опасности звони 112.",
     sos_invite: "Пригласить контакт", my_data: "Мои данные",
@@ -439,7 +439,7 @@ const I18N = {
     history: "Історія", more: "Показати ще", profile: "Профіль", tab_home: "Головна",
     weight: "Вага", kg: "кг", save: "Зберегти",
     weight_hint: "Потрібна для оцінки калорій за методом MET: це приблизна оцінка, а не медичний розрахунок.",
-    language: "Мова", lang_auto: "Як у Telegram", records: "Особисті рекорди",
+    language: "Мова", records: "Особисті рекорди",
     sos_title: "Екстрені контакти (SOS)",
     sos_hint: "Контакт сам відкриває посилання й погоджується. Кнопка SOS — на екрані поточного тренування: контакти отримають твою останню геопозицію. Це не виклик екстрених служб — у небезпеці телефонуй 112.",
     sos_invite: "Запросити контакт", my_data: "Мої дані",
@@ -524,7 +524,7 @@ const I18N = {
     history: "History", more: "Show more", profile: "Profile", tab_home: "Home",
     weight: "Weight", kg: "kg", save: "Save",
     weight_hint: "Used to estimate calories with the MET method: a rough estimate, not a medical calculation.",
-    language: "Language", lang_auto: "As in Telegram", records: "Personal records",
+    language: "Language", records: "Personal records",
     sos_title: "Emergency contacts (SOS)",
     sos_hint: "A contact opens the link and agrees themselves. The SOS button is on the screen of an ongoing workout: your contacts get your last location. It doesn't call emergency services — if you're in danger, call 112.",
     sos_invite: "Invite a contact", my_data: "My data",
@@ -862,18 +862,19 @@ async function showProfile() {
       `<div class="rec-row"><span>${t(`rec_${key}`)}</span><b>${RECORDS[key](v)}</b></div>`).join("")
   ).join("") || `<p class="hint">${t("records_empty")}</p>`;
 }
-// Язык: «Как в Telegram» или один из трёх; меняет и Mini App, и бота, и карточки.
+// Язык профиля: меняет и Mini App, и бота, и карточки. По умолчанию — язык Telegram.
 function langChips() {
-  const options = { "": t("lang_auto"), ru: "Русский", uk: "Українська", en: "English" };
+  const options = { ru: "Русский", uk: "Українська", en: "English" };
   const el = $("profile-lang");
+  // Подсвечен действующий язык: выбранный в профиле, а пока не выбирали — язык Telegram (определён при первом входе).
   el.innerHTML = Object.entries(options).map(([k, title]) =>
-    `<button data-lang="${k}" aria-pressed="${k === (me.lang_choice || "")}" lang="${k || lang}"><span>${title}</span></button>`).join("");
+    `<button data-lang="${k}" aria-pressed="${k === me.lang}" lang="${k}"><span>${title}</span></button>`).join("");
   el.onclick = async (e) => {
     const b = e.target.closest("button");
     if (!b || b.getAttribute("aria-pressed") === "true") return;
     if (tg) tg.HapticFeedback.selectionChanged();
     try {
-      setLang((await post("/api/lang", { lang: b.dataset.lang || null })).lang);
+      setLang((await post("/api/lang", { lang: b.dataset.lang })).lang);
       await showProfile();
     } catch (err) { showError(err); }
   };
