@@ -798,6 +798,7 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         bot.db.add_referral(4, 1)
         self.assertEqual((await self.call("GET", "/api/admin", 1)).status, 404)
         self.assertFalse((await (await self.call("GET", "/api/rides", 1)).json())["admin"])
+        self.assertRegex((await (await self.call("GET", "/api/rides", 1)).json())["version"], r"^\d+\.\d+\.\d+$")
         with patch.object(bot, "ADMIN_CHAT_ID", "9, 1"):
             self.assertTrue((await (await self.call("GET", "/api/rides", 1)).json())["admin"])
             response = await self.call("GET", "/api/admin?tz=-60", 1)

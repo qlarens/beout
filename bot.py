@@ -45,6 +45,7 @@ from stats import compute_stats, elevation_gain, fmt_duration, streaks
 from settings import (
     ACTIVITIES,
     APP_NAME,
+    APP_VERSION,
     ELEVATION_API,
     ELEVATION_BATCH,
     ELEVATION_MAX_POINTS,
@@ -804,6 +805,7 @@ async def api_rides(request):
         "lang": db.user_lang(user_id),
         "lang_choice": db.lang_choice(user_id),  # None — как в Telegram
         "admin": user_id in admin_ids(),
+        "version": APP_VERSION,
     })
 
 
