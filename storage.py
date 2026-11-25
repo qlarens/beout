@@ -95,6 +95,7 @@ NEW_COLUMNS = {
     ),
     "groups": ("lang TEXT",),  # язык того, кто вызвал /top, — для автопоста рейтинга
     "sos_contacts": ("lang TEXT",),  # язык контакта, когда он согласился: SOS придёт на нём
+    "points": ("snap_lat REAL", "snap_lon REAL"),  # точка, привязанная к дороге (только велотренировки)
     "rides": (
         *(f"{k} NUMERIC" for k in STAT_KEYS),  # заполняются при завершении тренировки
         f"kind TEXT NOT NULL DEFAULT '{DEFAULT_ACTIVITY}'",
@@ -726,11 +727,39 @@ class Storage:
             )
 
     def get_points(self, ride_id):
+        """[(ts, lat, lon, accuracy)] по времени. У велотренировки — привязанные к дорогам, где привязка есть."""
         rows = self.conn.execute(
-            "SELECT ts, lat, lon FROM points WHERE ride_id = ? ORDER BY ts",
+            "SELECT p.ts, p.lat, p.lon, p.accuracy, p.snap_lat, p.snap_lon, r.kind FROM points p "
+            "JOIN rides r ON r.id = p.ride_id WHERE p.ride_id = ? ORDER BY p.ts",
             (ride_id,),
         ).fetchall()
-        return [(r["ts"], r["lat"], r["lon"]) for r in rows]
+        return [
+            (r["ts"], r["snap_lat"], r["snap_lon"], r["accuracy"])
+            if r["kind"] == "ride" and r["snap_lat"] is not None else (r["ts"], r["lat"], r["lon"], r["accuracy"])
+            for r in rows
+        ]
+
+    def raw_points(self, ride_id):
+        """[(ts, lat, lon, accuracy, rowid)] как пришли из Telegram — для привязки к дорогам."""
+        return [tuple(r) for r in self.conn.execute(
+            "SELECT ts, lat, lon, accuracy, rowid FROM points WHERE ride_id = ? ORDER BY ts", (ride_id,))]
+
+    def snap_ride(self, ride_id, snapped, max_change):
+        """Привязка к дорогам: snapped — [(rowid, lat, lon)]. Если дистанция от неё изменилась больше чем
+        на max_change (доля), привязке не верим и оставляем исходный трек. True — привязка принята."""
+        ride = self.get_ride(ride_id)
+        before = compute_stats(self.get_points(ride_id), 0, ride["kind"])["distance_km"]
+        with self.conn:
+            self.conn.executemany(
+                "UPDATE points SET snap_lat = ?, snap_lon = ? WHERE rowid = ? AND ride_id = ?",
+                [(lat, lon, rowid, ride_id) for rowid, lat, lon in snapped],
+            )
+            after = compute_stats(self.get_points(ride_id), 0, ride["kind"])["distance_km"]
+            if not before or abs(after - before) / before > max_change:
+                self.conn.execute("UPDATE points SET snap_lat = NULL, snap_lon = NULL WHERE ride_id = ?", (ride_id,))
+                return False
+            self._save_stats(ride_id)
+        return True
 
     # --- резервные копии ---
     def backup(self, backup_dir, keep=7):

@@ -41,10 +41,11 @@ from aiohttp import ClientError, ClientSession, ClientTimeout, web
 from auth import validate_init_data
 from cards import FIELDS, FORMATS, PANELS, PhotoError, map_height, map_view, render, render_card
 from i18n import DEFAULT_LANG, LANGS, pick, t
-from stats import compute_stats, elevation_gain, fmt_duration, streaks
+from stats import clean, compute_stats, elevation_gain, fmt_duration, streaks
 from settings import (
     ACTIVITIES,
     APP_NAME,
+    DEFAULT_ACCURACY_M,
     APP_VERSION,
     ELEVATION_API,
     ELEVATION_BATCH,
@@ -53,6 +54,14 @@ from settings import (
     ELEVATION_SMOOTH_POINTS,
     ELEVATION_TIMEOUT_S,
     MAP_CACHE_TILES,
+    MAP_MATCH_CHUNK,
+    MAP_MATCH_MAX_CHANGE,
+    MAP_MATCH_MAX_POINTS,
+    MAP_MATCH_MIN_CONFIDENCE,
+    MAP_MATCH_RADIUS_M,
+    MAP_MATCH_TIMEOUT_S,
+    MAP_MATCH_TOTAL_TIMEOUT_S,
+    MAP_MATCH_URL,
     MAP_TILES,
     MAP_TIMEOUT_S,
     MAP_USER_AGENT,
@@ -74,7 +83,7 @@ ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 # Только для локальной отладки в обычном браузере, без Telegram. В проде не задавать!
 DEV_USER_ID = os.environ.get("DEV_USER_ID")
 # Поменял webapp/privacy.html — увеличь: бот попросит всех принять условия заново.
-POLICY_VERSION = 6
+POLICY_VERSION = 7
 PAGE_SIZE = 50
 NETWORK_RETRY_S = 10
 FLOOD_MAX_WAIT_S = 600
@@ -238,6 +247,48 @@ async def fetch_elevations(track):
 _tiles = {}  # правила OSM требуют кэшировать плитки
 
 
+async def map_match(points):
+    """Привязка велотрека к дорогам (OSRM map matching). points — [(ts, lat, lon, accuracy, rowid)].
+
+    Шлём точки без выбросов кусками по MAP_MATCH_CHUNK, не чаще запроса в секунду (правила публичного
+    сервера); только координаты и время, без Telegram ID. Кусок с низкой уверенностью OSRM пропускаем.
+    Возвращает [(rowid, lat, lon)] привязанных точек или None, если ничего не вышло.
+    """
+    points = clean(points, "ride")
+    if not MAP_MATCH_URL or not 2 <= len(points) <= MAP_MATCH_MAX_POINTS:
+        return None
+    lo, hi = MAP_MATCH_RADIUS_M
+    snapped = []
+    try:
+        async with ClientSession(timeout=ClientTimeout(total=MAP_MATCH_TIMEOUT_S),
+                                 headers={"User-Agent": MAP_USER_AGENT}) as http:
+            for start in range(0, len(points), MAP_MATCH_CHUNK):
+                chunk = points[start:start + MAP_MATCH_CHUNK]
+                if len(chunk) < 2:
+                    break
+                if start:
+                    await asyncio.sleep(1)
+                coords = ";".join(f"{lon:.6f},{lat:.6f}" for _, lat, lon, *_ in chunk)
+                params = {
+                    "timestamps": ";".join(str(int(p[0])) for p in chunk),
+                    "radiuses": ";".join(str(round(min(max(p[3] or DEFAULT_ACCURACY_M, lo), hi))) for p in chunk),
+                    "overview": "false", "gaps": "split",
+                }
+                async with http.get(f"{MAP_MATCH_URL}/{coords}", params=params) as response:
+                    data = await response.json(content_type=None) if response.status == 200 else None
+                if not data or data.get("code") != "Ok" or not data.get("matchings"):
+                    continue
+                if min(m.get("confidence", 0) for m in data["matchings"]) < MAP_MATCH_MIN_CONFIDENCE:
+                    continue
+                for p, tp in zip(chunk, data.get("tracepoints") or []):
+                    if tp and tp.get("location"):
+                        snapped.append((p[4], tp["location"][1], tp["location"][0]))
+    except (ClientError, asyncio.TimeoutError, ValueError, KeyError, TypeError, IndexError) as e:
+        logging.warning("Привязка к дорогам не удалась: %r", e)
+        return None
+    return snapped or None
+
+
 async def fetch_tiles(keys):
     """PNG плиток OSM по ключам (z, x, y), по одной; None — сервер недоступен, карточка будет без карты.
 
@@ -272,6 +323,13 @@ async def finish_and_report(bot, ride_id, ts=None, manual=False):
     if not db.finish_ride(ride_id, ts):
         return
     ride = db.get_ride(ride_id)
+    if ride["kind"] == "ride":  # велотрек — к дорогам; не вышло — остаётся как записан
+        try:
+            snapped = await asyncio.wait_for(map_match(db.raw_points(ride_id)), MAP_MATCH_TOTAL_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            snapped = None
+        if snapped and db.snap_ride(ride_id, snapped, MAP_MATCH_MAX_CHANGE):
+            ride = db.get_ride(ride_id)
     track = compute_stats(db.get_points(ride_id), 0, ride["kind"])["track"]
     elevations = await fetch_elevations(track) if len(track) > 1 else None
     if elevations:  # сервис недоступен — просто без высоты
@@ -977,7 +1035,7 @@ async def api_sos_send(request):
     contacts = db.sos_contacts(user_id)
     if not contacts:
         raise fail(web.HTTPBadRequest, request, "err_sos_no_contacts")
-    ts, lat, lon = points[-1]
+    ts, lat, lon, _ = points[-1]
     bot = request.app[BOT_KEY]
     minutes = int(max(0, time.time() - ts) // 60)
     sent = 0

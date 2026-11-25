@@ -66,19 +66,19 @@ TEXTS = {
     "btn_read": {"ru": "📄 Прочитать", "uk": "📄 Прочитати", "en": "📄 Read"},
     "policy_updated": {
         "ru": "📄 <b>Условия использования обновились.</b>\n\n"
-              "Что нового: приглашения друзей по ссылке; своё фото на карточке тренировки "
-              "(обрабатывается и не хранится); дата регистрации и последнего входа в приложение — "
-              "для обезличенной статистики.\n\n"
+              "Что нового: велотренировки привязываются к дорогам через сервис OSRM — так точнее "
+              "дистанция и скорость (ему уходят только координаты и время, без Telegram ID). "
+              "Раньше добавились приглашения друзей, своё фото на карточке и обезличенная статистика.\n\n"
               "Пока ты не примешь новые условия, я не записываю тренировки.",
         "uk": "📄 <b>Умови використання оновилися.</b>\n\n"
-              "Що нового: запрошення друзів за посиланням; своє фото на картці тренування "
-              "(обробляється й не зберігається); дата реєстрації та останнього входу в застосунок — "
-              "для знеособленої статистики.\n\n"
+              "Що нового: велотренування прив'язуються до доріг через сервіс OSRM — так точніші "
+              "дистанція та швидкість (йому йдуть лише координати й час, без Telegram ID). "
+              "Раніше додалися запрошення друзів, своє фото на картці та знеособлена статистика.\n\n"
               "Поки ти не приймеш нові умови, я не записую тренування.",
         "en": "📄 <b>The terms of use have been updated.</b>\n\n"
-              "What's new: inviting friends with a link; your own photo on a workout card "
-              "(processed, never stored); the date you joined and last opened the app, "
-              "for anonymised statistics.\n\n"
+              "What's new: bike rides are snapped to roads by the OSRM service for more precise "
+              "distance and speed (it only gets coordinates and times, no Telegram ID). "
+              "Earlier we added friend invites, your own photo on cards and anonymised statistics.\n\n"
               "Until you accept the new terms, I won't record workouts.",
     },
     "btn_policy": {

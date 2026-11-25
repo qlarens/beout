@@ -30,6 +30,8 @@ REAL_FETCH_ELEVATIONS = bot.fetch_elevations
 bot.fetch_elevations = AsyncMock(return_value=None)
 REAL_FETCH_TILES = bot.fetch_tiles  # и в OSM тоже: см. MapTest
 bot.fetch_tiles = AsyncMock(return_value=None)
+REAL_MAP_MATCH = bot.map_match  # и в OSRM: см. MapMatchTest
+bot.map_match = AsyncMock(return_value=None)
 from auth import validate_init_data  # noqa: E402
 import cards  # noqa: E402
 from cards import MAP_H, MAP_MARGIN, MAP_W, TILE, map_view, project, render_card, render_story  # noqa: E402
@@ -55,6 +57,16 @@ def line(n, t0=0.0):
 
 
 M_PER_DEG = 6_371_000 * 3.141592653589793 / 180  # метров в градусе широты (как в haversine)
+
+
+def noisy(points, sigma_m, seed=1):
+    """Шум GPS: точка смещена случайно на ~sigma_m (по нормальному закону), погрешность = sigma_m."""
+    import math
+    import random
+    rnd = random.Random(seed)
+    k = math.cos(math.radians(52.0))
+    return [(t, lat + rnd.gauss(0, sigma_m / 1.4) / M_PER_DEG, lon + rnd.gauss(0, sigma_m / 1.4) / M_PER_DEG / k, sigma_m)
+            for t, lat, lon in points]
 
 
 def track(*legs, dt=6):
@@ -151,7 +163,7 @@ class StatsTest(unittest.TestCase):
         self.assertEqual(compute_stats(track(10), 75)["moving_s"], 210)  # короткое замедление — в движении
         long_crawl = compute_stats(track(60), 75)
         self.assertEqual(long_crawl["duration_s"], 260)
-        self.assertEqual(long_crawl["moving_s"], 210)  # после 12 с медленной езды — пауза
+        self.assertEqual(long_crawl["moving_s"], 200)  # медленнее 12 с — пауза целиком, задним числом
 
     def test_speed_limit_depends_on_activity(self):
         fast = [(i * 10, 52.0 + i * 0.001, 21.0) for i in range(10)]  # ~40 км/ч
@@ -180,10 +192,63 @@ class StatsTest(unittest.TestCase):
 
     def test_splits_and_best_efforts(self):
         stats = compute_stats(track((1, 10), (1, 12), (3.5, 10)), 70, "run")
-        self.assertEqual(stats["splits"][:2], [360, 300])
-        self.assertEqual(stats["best_1k_s"], 300)
-        self.assertEqual(stats["best_5k_s"], 300 + 4 * 360)
+        # Темп меняется мгновенно ровно на отметке — сглаживание сдвигает её не больше чем на секунду.
+        self.assertEqual(stats["splits"][0], 360)
+        self.assertAlmostEqual(stats["splits"][1], 300, delta=1)
+        self.assertAlmostEqual(stats["best_1k_s"], 300, delta=1)
+        self.assertAlmostEqual(stats["best_5k_s"], 300 + 4 * 360, delta=2)
         self.assertIsNone(compute_stats(track((0.9, 10)), 70, "run")["best_1k_s"])
+
+    def test_noisy_gps_does_not_inflate_distance(self):
+        """Шум GPS ±6 м раньше добавлял к пробежке ~13 % (зигзаг вокруг трека)."""
+        truth = track((3, 10), dt=5)
+        stats = compute_stats(noisy(truth, 6), 70, "run")
+        self.assertAlmostEqual(stats["distance_km"], 3.0, delta=0.03)
+        self.assertAlmostEqual(stats["avg_speed_kmh"], 10.0, delta=0.2)
+        self.assertAlmostEqual(stats["max_speed_kmh"], 10.0, delta=0.6)
+
+    def test_integer_seconds(self):
+        """Время у точек — целые секунды: отрезки 3–5 с поодиночке врали бы на 20–30 %."""
+        truth = [(t, lat, lon) for t, lat, lon in track((2, 20), dt=1)]
+        sampled, i = [], 0
+        while i < len(truth):
+            sampled.append(truth[i])
+            i += (3, 5, 4)[len(sampled) % 3]
+        stats = compute_stats(noisy(sampled, 5), 70, "ride")
+        self.assertAlmostEqual(stats["avg_speed_kmh"], 20, delta=0.3)
+        self.assertAlmostEqual(stats["max_speed_kmh"], 20, delta=0.8)
+
+    def test_outliers(self):
+        base = noisy(track((1.5, 10), dt=5), 5)
+        clean_stats = compute_stats(base, 70, "run")
+        bad_accuracy = base[:20] + [(base[20][0] + 1, base[20][1] + 0.0006, base[20][2], 60)] + base[21:]
+        sideways = list(base)
+        t, lat, lon, acc = sideways[30]
+        sideways[30] = (t, lat, lon + 80 / M_PER_DEG / 0.6157, acc)  # на 80 м вбок и обратно
+        along = list(base)
+        t, lat, lon, acc = along[40]
+        along[40] = (t, lat + 60 / M_PER_DEG, lon, acc)  # на 60 м вперёд по ходу и обратно
+        for points in (bad_accuracy, sideways, along):
+            stats = compute_stats(points, 70, "run")
+            self.assertAlmostEqual(stats["distance_km"], clean_stats["distance_km"], delta=0.02)
+            self.assertLess(stats["max_speed_kmh"], clean_stats["max_speed_kmh"] + 0.5)
+
+    def test_real_turnaround_is_kept(self):
+        """Бегун добежал до конуса и вернулся: это не выброс «туда и обратно»."""
+        out = track((0.3, 10), dt=5)
+        back = [(out[-1][0] + 5 * (i + 1), lat, lon) for i, (_, lat, lon) in enumerate(reversed(out[:-1]))]
+        stats = compute_stats(noisy(out + back, 4), 70, "run")
+        self.assertAlmostEqual(stats["distance_km"], 0.6, delta=0.03)
+
+    def test_stop_with_noise(self):
+        """Светофор 90 с с шумом ±6 м: ни времени, ни дистанции; подъезд к нему не теряется."""
+        go = track((1, 20), dt=4)
+        t0, lat0, lon0 = go[-1]
+        stop = [(t0 + 4 * i, lat0, lon0) for i in range(1, 23)]
+        go2 = [(stop[-1][0] + t, lat0 + lat - 52.0, lon) for t, lat, lon in track((1, 20), dt=4)[1:]]
+        stats = compute_stats(noisy(go + stop + go2, 6), 70, "ride")
+        self.assertAlmostEqual(stats["distance_km"], 2.0, delta=0.03)
+        self.assertAlmostEqual(stats["moving_s"], 360, delta=8)  # 2 км по 20 км/ч
 
     def test_max_speed_is_smoothed(self):
         points = track((1, 20), dt=10)
@@ -647,6 +712,88 @@ class MapTest(unittest.IsolatedAsyncioTestCase):
         bot._tiles.clear()
         with patch.object(bot, "MAP_TILES", "http://127.0.0.1:1/{}/{}/{}.png"):
             self.assertIsNone(await REAL_FETCH_TILES(keys))  # OSM недоступен — карточка без карты
+
+
+class MapMatchTest(unittest.IsolatedAsyncioTestCase):
+    """Привязка велотреков к дорогам: локальный сервер отвечает как OSRM /match."""
+
+    async def osrm(self, confidence=0.9, shift=0.0001):
+        self.requests = []
+
+        async def match(request):
+            coords = [tuple(map(float, c.split(","))) for c in request.match_info["coords"].split(";")]
+            self.requests.append((len(coords), request.query, request.headers["User-Agent"]))
+            return web.json_response({
+                "code": "Ok", "matchings": [{"confidence": confidence}],
+                "tracepoints": [None if i == 3 else {"location": [lon + shift, lat]} for i, (lon, lat) in enumerate(coords)],
+            })
+
+        app = web.Application()
+        app.router.add_get("/match/{coords}", match)
+        server = TestServer(app)
+        await server.start_server()
+        self.addAsyncCleanup(server.close)
+        return str(server.make_url("/match"))
+
+    async def test_match_in_chunks(self):
+        url = await self.osrm()
+        points = [(ts, lat, lon, 8, i) for i, (ts, lat, lon) in enumerate(track((2, 20), dt=4))]  # 360 с → 91 точка
+        points += [(points[-1][0] + 4 * k, points[-1][1] + k * 0.0002, 21.0, 8, 91 + k) for k in range(1, 60)]
+        with patch.object(bot, "MAP_MATCH_URL", url), patch.object(bot.asyncio, "sleep", AsyncMock()):
+            snapped = await REAL_MAP_MATCH(points)
+        self.assertEqual([n for n, *_ in self.requests], [100, 50])  # кусками по 100
+        query, agent = self.requests[0][1], self.requests[0][2]
+        self.assertEqual(query["timestamps"].split(";")[:2], ["0", "4"])
+        self.assertEqual(set(query["radiuses"].split(";")), {"8"})
+        self.assertTrue(agent.startswith("beout-bot/"))
+        self.assertEqual(len(snapped), 148)  # у двух точек OSRM не нашёл дорогу
+        rowid, lat, lon = snapped[0]
+        self.assertEqual((rowid, lat), (0, points[0][1]))
+        self.assertAlmostEqual(lon, points[0][2] + 0.0001)
+
+    async def test_low_confidence_or_unavailable(self):
+        points = [(ts, lat, lon, 8, i) for i, (ts, lat, lon) in enumerate(track((1, 20), dt=4))]
+        url = await self.osrm(confidence=0.2)
+        with patch.object(bot, "MAP_MATCH_URL", url):
+            self.assertIsNone(await REAL_MAP_MATCH(points))  # OSRM не уверен — трек остаётся как был
+        with patch.object(bot, "MAP_MATCH_URL", "http://127.0.0.1:1/match"):
+            self.assertIsNone(await REAL_MAP_MATCH(points))  # сервис недоступен
+        with patch.object(bot, "MAP_MATCH_URL", ""):
+            self.assertIsNone(await REAL_MAP_MATCH(points))  # выключено
+
+    def test_snap_ride(self):
+        db = Storage(":memory:")
+        self.addCleanup(db.conn.close)
+        ride_id = db.start_ride(1, 1, 1, 0, kind="ride")
+        for ts, lat, lon in track((2, 20), dt=4):
+            db.add_point(ride_id, ts, lat, lon, 8)
+        db.finish_ride(ride_id)
+        raw = db.raw_points(ride_id)
+        near = [(rowid, lat, lon + 3 / M_PER_DEG / 0.6157) for _, lat, lon, _, rowid in raw]  # дорога в 3 м
+        self.assertTrue(db.snap_ride(ride_id, near, 0.25))
+        self.assertAlmostEqual(db.get_points(ride_id)[0][2], near[0][2])
+        self.assertEqual(db.export_user(1)["rides"][0]["points"][0]["lon"], raw[0][2])  # выгрузка — как записано
+        db.set_ride_kind(ride_id, "run")
+        self.assertEqual(db.get_points(ride_id)[0][2], raw[0][2])  # бег — без привязки к велодорогам
+        db.set_ride_kind(ride_id, "ride")
+        n = len(raw)
+        bulge = lambda i: max(0, n / 6 - abs(i - n / 2)) / (n / 6) * 800  # noqa: E731  до 800 м в сторону
+        detour = [(rowid, lat, lon + bulge(i) / M_PER_DEG / 0.6157) for i, (_, lat, lon, _, rowid) in enumerate(raw)]
+        self.assertFalse(db.snap_ride(ride_id, detour, 0.25))  # «увела» на дорогу с крюком — не верим
+        self.assertEqual(db.get_points(ride_id)[0][2], raw[0][2])
+
+    async def test_finish_uses_matched_track(self):
+        bot.db = Storage(":memory:")
+        self.addCleanup(bot.db.conn.close)
+        bot.db.set_consent(1, bot.POLICY_VERSION)
+        ride_id = bot.db.start_ride(1, 1, 1, 0, kind="ride")
+        for ts, lat, lon in track((1, 20), dt=4):
+            bot.db.add_point(ride_id, ts, lat, lon, 8)
+        snapped = [(rowid, lat, lon + 0.0001) for *_, rowid in bot.db.raw_points(ride_id) for lat, lon in [_[1:3]]]
+        with patch.object(bot, "map_match", AsyncMock(return_value=snapped)) as match:
+            await bot.finish_and_report(fake_bot(), ride_id)
+        match.assert_awaited_once()
+        self.assertAlmostEqual(bot.db.get_points(ride_id)[0][2], 21.0001)
 
 
 class ApiTest(unittest.IsolatedAsyncioTestCase):

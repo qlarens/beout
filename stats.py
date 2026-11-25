@@ -3,7 +3,25 @@ import math
 from bisect import bisect_left
 from datetime import timedelta
 
-from settings import ACTIVITIES, AUTOPAUSE_AFTER_S, DEFAULT_ACTIVITY, MIN_MOVE_M, SMOOTH_SEGMENTS
+from settings import (
+    ACCURACY_OUTLIER_M,
+    ACCURACY_OUTLIER_RATIO,
+    ACTIVITIES,
+    AUTOPAUSE_AFTER_S,
+    DEFAULT_ACCURACY_M,
+    DEFAULT_ACTIVITY,
+    JITTER_SIGMAS,
+    JITTER_WINDOW_S,
+    MAX_SPEED_MIN_M,
+    MAX_SPEED_WINDOW_S,
+    MIN_MOVE_M,
+    RESIDUAL_SIGMAS,
+    STOP_EDGE_SIGMAS,
+    STOP_FLICKER_S,
+    STOP_WINDOW_S,
+    SPIKE_MIN_DETOUR_M,
+    SPIKE_SPEED_RATIO,
+)
 
 EARTH_RADIUS_M = 6_371_000.0
 
@@ -24,54 +42,277 @@ def met_for_speed(speed_kmh, kind=DEFAULT_ACTIVITY):
     return ACTIVITIES[kind]["met"][-1][1]
 
 
-def compute_stats(points, weight_kg, kind=DEFAULT_ACTIVITY):
-    """points: список (ts, lat, lon), отсортированный по времени.
+def _median(xs):
+    xs = sorted(xs)
+    n = len(xs)
+    return (xs[(n - 1) // 2] + xs[n // 2]) / 2 if xs else 0.0
 
-    Калории считаются по каждому отрезку: MET(тип, скорость) × вес × часы.
-    Остановки (светофоры, перекусы) после AUTOPAUSE_AFTER_S в дистанцию,
-    калории и время в движении не входят. Сплиты и лучшие 1/5 км — по времени в движении.
+
+def _accuracy(p):
+    acc = p[3] if len(p) > 3 else None
+    return max(acc, MIN_MOVE_M) if acc else DEFAULT_ACCURACY_M
+
+
+def clean(points, kind=DEFAULT_ACTIVITY):
+    """Отсев выбросов GPS. points — (ts, lat, lon[, accuracy]) по времени; возвращает оставшиеся как есть.
+
+    1. Погрешность намного хуже соседей — точка из «плохого» момента (здание, тоннель).
+    2. Нереальная скорость от предыдущей точки — скачок; следующую сравниваем всё с той же предыдущей.
+    3. Одна точка «туда и обратно» намного быстрее обычного темпа — выброс. Настоящий разворот
+       (бегун у конуса) идёт с обычной скоростью и остаётся.
     """
     limits = ACTIVITIES[kind]
-    kcal = 0.0
-    slow_s = 0.0  # сколько секунд подряд медленнее pause_kmh
-    # Накопленные дистанция (м) и время в движении (с) после каждого засчитанного отрезка.
-    cum_d, cum_t = [0.0], [0.0]
-    track = [points[0][1:]] if points else []  # маршрут без выбросов GPS — для карты и карточки
+    good = []
+    for i, p in enumerate(points):
+        acc = p[3] if len(p) > 3 else None
+        near = [q[3] for q in points[max(0, i - 5):i] + points[i + 1:i + 6] if len(q) > 3 and q[3]]
+        if acc and near and acc > ACCURACY_OUTLIER_M and acc > ACCURACY_OUTLIER_RATIO * _median(near):
+            continue
+        good.append(p)
 
-    prev = points[0] if points else None
-    for cur in points[1:]:
-        t1, la1, lo1 = prev
-        t2, la2, lo2 = cur
-        dt = t2 - t1
-        if dt <= 0:
+    steady = []
+    for p in good:
+        if steady:
+            prev = steady[-1]
+            dt = p[0] - prev[0]
+            if dt <= 0 or haversine_m(prev[1], prev[2], p[1], p[2]) / dt * 3.6 > limits["max_kmh"]:
+                continue
+        steady.append(p)
+
+    def kmh(a, b):
+        return haversine_m(a[1], a[2], b[1], b[2]) / (b[0] - a[0]) * 3.6
+
+    typical = _median([kmh(a, b) for a, b in zip(steady, steady[1:])])
+    out = []
+    for p in steady:
+        if len(out) >= 2:
+            a, b = out[-2], out[-1]
+            detour = (haversine_m(a[1], a[2], b[1], b[2]) + haversine_m(b[1], b[2], p[1], p[2])
+                      - haversine_m(a[1], a[2], p[1], p[2]))
+            if (detour > max(SPIKE_MIN_DETOUR_M, 3 * _accuracy(b))
+                    and min(kmh(a, b), kmh(b, p)) > SPIKE_SPEED_RATIO * max(typical, limits["pause_kmh"])):
+                out.pop()
+        out.append(p)
+    return out
+
+
+def smooth(points, agility):
+    """Сглаживание Калмана (модель «постоянная скорость») вперёд и назад (RTS) по каждой оси.
+
+    Шум измерения — погрешность точки: неточная точка почти не сдвигает трек, точная — тянет к себе.
+    agility — спектральная плотность ускорения, м²/с³: насколько резко может меняться скорость.
+    Возвращает [(lat, lon, дисперсия положения м², скорость м/с)].
+    """
+    lat0, lon0 = points[0][1], points[0][2]
+    m_per_deg = math.radians(1) * EARTH_RADIUS_M
+    k_lon = m_per_deg * math.cos(math.radians(lat0))
+    ts = [p[0] for p in points]
+    r = [_accuracy(p) ** 2 for p in points]
+    out_axes = []
+    for zs in ([(p[2] - lon0) * k_lon for p in points], [(p[1] - lat0) * m_per_deg for p in points]):
+        # Состояние (положение, скорость), ковариация — [[a, b], [b, c]].
+        x, v, pa, pb, pc = zs[0], 0.0, r[0], 0.0, 1e4  # скорость поначалу неизвестна совсем
+        filt, pred = [], []
+        for k, z in enumerate(zs):
+            if k:
+                dt = ts[k] - ts[k - 1]
+                x = x + v * dt
+                pa, pb, pc = (pa + 2 * dt * pb + dt * dt * pc + agility * dt ** 3 / 3,
+                              pb + dt * pc + agility * dt * dt / 2,
+                              pc + agility * dt)
+            pred.append((x, v, pa, pb, pc))
+            s = pa + r[k]
+            ka, kb = pa / s, pb / s
+            y = z - x
+            x, v = x + ka * y, v + kb * y
+            pa, pb, pc = (1 - ka) * pa, (1 - ka) * pb, pc - kb * pb
+            filt.append((x, v, pa, pb, pc))
+        sm = [None] * len(zs)
+        sm[-1] = filt[-1]
+        for k in range(len(zs) - 2, -1, -1):
+            dt = ts[k + 1] - ts[k]
+            fx, fv, fa, fb, fc = filt[k]
+            px, pv, qa, qb, qc = pred[k + 1]
+            sx, sv, sa, sb, sc = sm[k + 1]
+            # C = Pf · Fᵀ · Pp⁻¹
+            fa_, fb_ = fa + dt * fb, fb  # Pf·Fᵀ, первая строка: (a + dt·b, b)
+            fc1, fc2 = fb + dt * fc, fc  # вторая строка
+            det = qa * qc - qb * qb
+            ia, ib, ic = qc / det, -qb / det, qa / det
+            c11, c12 = fa_ * ia + fb_ * ib, fa_ * ib + fb_ * ic
+            c21, c22 = fc1 * ia + fc2 * ib, fc1 * ib + fc2 * ic
+            dx, dv = sx - px, sv - pv
+            da, db, dc = sa - qa, sb - qb, sc - qc
+            nx, nv = fx + c11 * dx + c12 * dv, fv + c21 * dx + c22 * dv
+            na = fa + c11 * (c11 * da + c12 * db) + c12 * (c11 * db + c12 * dc)
+            nb = fb + c11 * (c21 * da + c22 * db) + c12 * (c21 * db + c22 * dc)
+            nc = fc + c21 * (c21 * da + c22 * db) + c22 * (c21 * db + c22 * dc)
+            sm[k] = (nx, nv, na, nb, nc)
+        out_axes.append([(st[0], st[2], st[1]) for st in sm])
+    return [(lat0 + y / m_per_deg, lon0 + x / k_lon, px + py, math.hypot(ux, uy))
+            for (x, px, ux), (y, py, uy) in zip(*out_axes)]
+
+
+def local_speeds(points, window_s):
+    """Скорость у каждой отрезка, км/ч: прямая по сырым точкам за ±window_s/2 вокруг его середины
+    (наименьшие квадраты, вес точки — 1/погрешность²). В отличие от сглаженного трека остановка
+    размывается на секунды, а не на десятки секунд — по ней и решаем, едем или стоим."""
+    lat0, lon0 = points[0][1], points[0][2]
+    m_per_deg = math.radians(1) * EARTH_RADIUS_M
+    k_lon = m_per_deg * math.cos(math.radians(lat0))
+    xs = [((p[2] - lon0) * k_lon, (p[1] - lat0) * m_per_deg, 1 / _accuracy(p) ** 2) for p in points]
+    ts = [p[0] for p in points]
+    out, a, b = [0.0], 0, 0
+    for i in range(1, len(points)):
+        mid = (ts[i] + ts[i - 1]) / 2
+        while ts[a] < mid - window_s / 2:
+            a += 1
+        while b + 1 < len(points) and ts[b + 1] <= mid + window_s / 2:
+            b += 1
+        lo, hi = min(a, i - 1), max(b, i)
+        w = sum(xs[k][2] for k in range(lo, hi + 1))
+        tm = sum(xs[k][2] * ts[k] for k in range(lo, hi + 1)) / w
+        stt = sum(xs[k][2] * (ts[k] - tm) ** 2 for k in range(lo, hi + 1))
+        v = [sum(xs[k][2] * (ts[k] - tm) * xs[k][axis] for k in range(lo, hi + 1)) / stt for axis in (0, 1)]
+        out.append(math.hypot(*v) * 3.6)
+    return out
+
+
+def compute_stats(points, weight_kg, kind=DEFAULT_ACTIVITY):
+    """points: список (ts, lat, lon[, accuracy]), отсортированный по времени.
+
+    Порядок: выбросы GPS → сглаживание Калмана с учётом погрешности → для каждого отрезка смотрим окна
+    вокруг него. Сместились за JITTER_WINDOW_S меньше шума — стоим; скорость — по пути за SPEED_WINDOW_S.
+    Стоянка или медленнее pause_kmh дольше AUTOPAUSE_AFTER_S — автопауза. Калории по каждому отрезку:
+    MET(тип, скорость окна) × вес × часы. Сплиты и лучшие 1/5 км — по времени в движении.
+    """
+    limits = ACTIVITIES[kind]
+    duration_s = (points[-1][0] - points[0][0]) if len(points) >= 2 else 0
+    pts = clean(points, kind)
+    sm = smooth(pts, limits["agility"]) if pts else []
+    # Выброс вдоль трека («скакнула вперёд и вернулась») крюка не даёт — его видно по сглаженному треку:
+    # точка дальше RESIDUAL_SIGMAS погрешностей от него. Убираем такие и сглаживаем заново.
+    keep = [p for p, q in zip(pts, sm)
+            if haversine_m(p[1], p[2], q[0], q[1]) <= max(SPIKE_MIN_DETOUR_M, RESIDUAL_SIGMAS * _accuracy(p))]
+    if 1 < len(keep) < len(pts):
+        pts, sm = keep, smooth(keep, limits["agility"])
+    ts = [p[0] for p in pts]
+    n_pts = len(pts)
+    seg = [0.0] + [haversine_m(sm[i - 1][0], sm[i - 1][1], sm[i][0], sm[i][1]) for i in range(1, n_pts)]
+    path = [0.0] * n_pts  # путь по сглаженному треку до каждой точки
+    for i in range(1, n_pts):
+        path[i] = path[i - 1] + seg[i]
+
+    # Каждый отрезок: стоим (за JITTER_WINDOW_S сместились в пределах шума), медленно (скорость по точкам
+    # за STOP_WINDOW_S ниже pause_kmh) или едем. Скорость — по нескольким точкам: ошибка целых секунд не копится.
+    status, speeds = [None], [0.0]
+    local = local_speeds(pts, STOP_WINDOW_S) if pts else []
+    a = b = 0
+    for i in range(1, n_pts):
+        mid = (ts[i] + ts[i - 1]) / 2
+        while ts[a] < mid - JITTER_WINDOW_S / 2:
+            a += 1
+        while b + 1 < n_pts and ts[b + 1] <= mid + JITTER_WINDOW_S / 2:
+            b += 1
+        lo, hi = min(a, i - 1), max(b, i)
+        moved = haversine_m(sm[lo][0], sm[lo][1], sm[hi][0], sm[hi][1])
+        speeds.append((sm[i - 1][3] + sm[i][3]) / 2 * 3.6)
+        if moved < max(MIN_MOVE_M, JITTER_SIGMAS * math.sqrt(sm[lo][2] + sm[hi][2])):
+            status.append("still")
+        else:
+            status.append("slow" if local[i] < limits["pause_kmh"] else "move")
+
+    # Всплеск «едем» короче STOP_FLICKER_S посреди остановки — шум, остановку он не разрывает.
+    i = 1
+    while i < n_pts:
+        if status[i] != "move":
+            i += 1
             continue
-        d = haversine_m(la1, lo1, la2, lo2)
-        speed = d / dt * 3.6
-        if speed > limits["max_kmh"]:
-            continue  # выброс GPS — выкидываем точку, сравниваем следующую с prev
-        if d < MIN_MOVE_M:
-            # Дрожание на месте: место prev не двигаем, время — да, чтобы первый отрезок
-            # после стоянки считался по своей скорости, а не растягивался на всю стоянку.
-            # shortcut: дрожание больше MIN_MOVE_M у ходьбы сойдёт за движение — сглаживать, если будут жалобы.
-            prev = (t2, la1, lo1)
+        j = i
+        while j < n_pts and status[j] == "move":
+            j += 1
+        if i > 1 and j < n_pts and ts[j - 1] - ts[i - 1] <= STOP_FLICKER_S:
+            for k in range(i, j):
+                status[k] = "slow"
+        i = j
+
+    # Автопауза задним числом: стоянка или медленный кусок дольше AUTOPAUSE_AFTER_S не идёт в движение целиком,
+    # короче — идёт целиком (светофор на 5 с — это ещё тренировка).
+    counted = [False] * n_pts
+    # Через длинную остановку засчитываем путь по прямой от точки до неё до точки после (без времени):
+    # и подъезд к светофору не теряется, и дрожание на месте не копится.
+    bridge = [0.0] * n_pts
+    i = 1
+    while i < n_pts:
+        if status[i] == "move":
+            counted[i], i = True, i + 1
             continue
-        prev = cur
-        track.append(cur[1:])
-        slow_s = slow_s + dt if speed < limits["pause_kmh"] else 0.0
-        if slow_s > AUTOPAUSE_AFTER_S:
-            continue  # стоим
-        cum_d.append(cum_d[-1] + d)
+        j = i
+        while j < n_pts and status[j] != "move":
+            j += 1
+        if ts[j - 1] - ts[i - 1] <= AUTOPAUSE_AFTER_S:
+            for k in range(i, j):
+                counted[k] = status[k] == "slow"  # «стоим» внутри короткой паузы — без шума в дистанции
+            i = j
+            continue
+        # Края длинной остановки уточняем по сырым точкам: пока точка в пределах STOP_EDGE_SIGMAS погрешностей
+        # от места остановки — уже (ещё) стоим. Окна скорости размывают край на ~10 с, это их убирает.
+        core = range(i - 1, j)
+        w = [1 / _accuracy(pts[k]) ** 2 for k in core]
+        here = (sum(wk * pts[k][1] for wk, k in zip(w, core)) / sum(w),
+                sum(wk * pts[k][2] for wk, k in zip(w, core)) / sum(w))
+
+        def near(k):
+            return haversine_m(*here, pts[k][1], pts[k][2]) <= STOP_EDGE_SIGMAS * _accuracy(pts[k])
+        while i > 1 and counted[i - 1] and near(i - 2):
+            i -= 1
+            counted[i] = False
+        while j < n_pts and status[j] == "move" and near(j):
+            status[j] = "slow"
+            j += 1
+        bridge[j - 1] = haversine_m(sm[i - 1][0], sm[i - 1][1], sm[j - 1][0], sm[j - 1][1])
+        i = j
+
+    kcal = 0.0
+    cum_d, cum_t = [0.0], [0.0]  # после каждого засчитанного отрезка
+    track = [sm[0][:2]] if sm else []  # сглаженный маршрут без стоянок — для карты и карточки
+    run_pts, run_id, run_cum, run = [], [], [], 0  # засчитанные точки без пауз: (ts, lat, lon), кусок, путь
+    for i in range(1, n_pts):
+        if not counted[i]:
+            if bridge[i]:
+                cum_d.append(cum_d[-1] + bridge[i])
+                cum_t.append(cum_t[-1])
+            run += 1
+            continue
+        if not run_pts or run_id[-1] != run:
+            run_pts.append((ts[i - 1], *sm[i - 1][:2]))
+            run_id.append(run)
+            run_cum.append(run_cum[-1] if run_cum else 0.0)
+        run_pts.append((ts[i], *sm[i][:2]))
+        run_id.append(run)
+        run_cum.append(run_cum[-1] + seg[i])
+        dt = ts[i] - ts[i - 1]
+        track.append(sm[i][:2])
+        cum_d.append(cum_d[-1] + seg[i])
         cum_t.append(cum_t[-1] + dt)
-        kcal += met_for_speed(speed, kind) * weight_kg * dt / 3600
+        kcal += met_for_speed(speeds[i], kind) * weight_kg * dt / 3600
 
     distance_m, moving_s = cum_d[-1], cum_t[-1]
     n = len(cum_d) - 1
-    # Максимум — по скользящему окну из SMOOTH_SEGMENTS отрезков (или всем, если их меньше).
-    w = min(SMOOTH_SEGMENTS, n)
-    max_speed = max(
-        ((cum_d[i] - cum_d[i - w]) / (cum_t[i] - cum_t[i - w]) * 3.6 for i in range(w, n + 1)),
-        default=0.0,
-    ) if w else 0.0
+    # Максимум — смещение по прямой за окно не короче MAX_SPEED_WINDOW_S в движении (без пауз внутри):
+    # и один шумный отрезок, и боковое дрожание трека рекорд не дадут; на поворотах окно чуть занижает.
+    max_speed, i = 0.0, 0
+    for j in range(1, len(run_pts)):
+        if run_id[j] != run_id[i]:
+            i = j
+        while i + 1 < j and run_pts[j][0] - run_pts[i + 1][0] >= MAX_SPEED_WINDOW_S and \
+                run_cum[j] - run_cum[i + 1] >= MAX_SPEED_MIN_M:
+            i += 1
+        span = run_pts[j][0] - run_pts[i][0]
+        if span >= MAX_SPEED_WINDOW_S and run_cum[j] - run_cum[i] >= MAX_SPEED_MIN_M:
+            max_speed = max(max_speed, haversine_m(*run_pts[i][1:], *run_pts[j][1:]) / span * 3.6)
+    if not max_speed and moving_s:  # тренировка короче окна — средняя
+        max_speed = distance_m / moving_s * 3.6
 
     def time_at(dist):
         """Время в движении, когда пройдено dist метров (линейно внутри отрезка)."""
@@ -90,7 +331,6 @@ def compute_stats(points, weight_kg, kind=DEFAULT_ACTIVITY):
         return int(round(min(ends + starts)))
 
     km_marks = [time_at(k * 1000) for k in range(int(round(distance_m, 1) // 1000) + 1)]
-    duration_s = (points[-1][0] - points[0][0]) if len(points) >= 2 else 0
     return {
         "distance_km": round(distance_m / 1000, 2),
         "duration_s": int(duration_s),
