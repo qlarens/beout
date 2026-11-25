@@ -32,7 +32,7 @@
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; padding: 16px 16px 100px;
+    margin: 0; padding: 16px 16px 88px;
     background: var(--bg); color: var(--text);
     font: 15px/1.4 "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
@@ -128,11 +128,8 @@
   .rec-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--card); }
   .rec-row b { font-family: "Inter Display", "Inter", sans-serif; }
 
-  /* Версия — над полосой панели вкладок: всегда на одном месте, не зависит от длины экрана. */
-  /* bottom считается от внутреннего края панели: +1px — чтобы не закрыть её верхнюю линию. */
-  nav .version { position: absolute; left: 0; right: 0; bottom: calc(100% + 1px); margin: 0; padding: 2px 0;
-                 background: var(--bg); text-align: center; font-size: 10px; line-height: 12px; }
-  nav .version::before { content: attr(data-v); color: var(--hint); opacity: .6; }
+  /* Версия — мелко и серо в самом низу профиля. */
+  .version { text-align: center; color: var(--hint); font-size: 10px; opacity: .6; margin: 24px 0 0; }
   .sheet { position: fixed; inset: 0; background: var(--bg); padding: 24px 16px; overflow: auto; z-index: 1000; }
   .sheet-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .sheet-head h1 { margin: 0; }
@@ -244,6 +241,7 @@
   <h2 data-t="partner_title"></h2>
   <p class="hint" data-t="partner_hint"></p>
   <button class="wide" id="partner"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/></svg><span data-t="partner_button"></span></button>
+  <p class="version" id="version"></p>
 </section>
 
 <section id="ride" class="hidden">
@@ -283,7 +281,6 @@
 <div class="error hidden" id="error" role="alert"></div>
 
 <nav id="tabs">
-  <p class="version" id="version"></p>
   <button data-go="home" aria-current="page"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5.5 9v12h13V9"/></svg><span data-t="tab_home"></span></button>
   <button data-go="history"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg><span data-t="history"></span></button>
   <button data-go="profile"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6 8-6s8 2 8 6"/></svg><span data-t="profile"></span></button>
@@ -741,7 +738,7 @@ async function loadMe() {
   me = await api("/api/rides");
   setLang(me.lang);
   $("admin-tab").classList.toggle("hidden", !me.admin);
-  $("version").dataset.v = `Be. Out! v${me.version}`;
+  $("version").textContent = `Be. Out! v${me.version}`;
   return me;
 }
 

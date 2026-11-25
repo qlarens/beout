@@ -80,7 +80,7 @@ SOS: Mini App → Профиль → «Пригласить контакт»; к
 - `cards.py` — карточки тренировки (Pillow): пост 4:5 и Stories 9:16 с настройками — тёмная карта OSM, только маршрут или без карты, своё фото на фоне, выбор цифр
 - `i18n.py` — тексты бота, карточек и ошибок API на русском, украинском и английском (тексты Mini App — в `webapp/index.html`, `I18N`)
 - `assets/` — логотип и шрифт Inter (OFL) для карточки и Mini App
-- `CHANGELOG.md` — версии; текущая — `APP_VERSION` в `settings.py`, видна внизу Mini App
+- `CHANGELOG.md` — версии; текущая — `APP_VERSION` в `settings.py`, видна внизу профиля в Mini App
 - `settings.py` — название приложения и все пороги (GPS, автопауза, таймауты)
 - `auth.py` — проверка `initData`
 - `webapp/` — Mini App и страница условий
