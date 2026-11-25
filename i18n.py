@@ -66,19 +66,19 @@ TEXTS = {
     "btn_read": {"ru": "📄 Прочитать", "uk": "📄 Прочитати", "en": "📄 Read"},
     "policy_updated": {
         "ru": "📄 <b>Условия использования обновились.</b>\n\n"
-              "Что нового: велотренировки привязываются к дорогам через сервис OSRM — так точнее "
-              "дистанция и скорость (ему уходят только координаты и время, без Telegram ID). "
-              "Раньше добавились приглашения друзей, своё фото на карточке и обезличенная статистика.\n\n"
+              "Что нового: активности в группах — лента тренировок (только если включишь «Публиковать»), "
+              "челленджи, сборы, дуэли, битвы клубов и номинации недели; для времени сборов храним часовой пояс "
+              "телефона. Раньше — привязка велотреков к дорогам (OSRM), приглашения и своё фото на карточке.\n\n"
               "Пока ты не примешь новые условия, я не записываю тренировки.",
         "uk": "📄 <b>Умови використання оновилися.</b>\n\n"
-              "Що нового: велотренування прив'язуються до доріг через сервіс OSRM — так точніші "
-              "дистанція та швидкість (йому йдуть лише координати й час, без Telegram ID). "
-              "Раніше додалися запрошення друзів, своє фото на картці та знеособлена статистика.\n\n"
+              "Що нового: активності в групах — стрічка тренувань (лише якщо ввімкнеш «Публікувати»), "
+              "челенджі, збори, дуелі, битви клубів і номінації тижня; для часу зборів зберігаємо часовий пояс "
+              "телефона. Раніше — прив'язка велотреків до доріг (OSRM), запрошення та своє фото на картці.\n\n"
               "Поки ти не приймеш нові умови, я не записую тренування.",
         "en": "📄 <b>The terms of use have been updated.</b>\n\n"
-              "What's new: bike rides are snapped to roads by the OSRM service for more precise "
-              "distance and speed (it only gets coordinates and times, no Telegram ID). "
-              "Earlier we added friend invites, your own photo on cards and anonymised statistics.\n\n"
+              "What's new: group activities — a workout feed (only if you turn on “Post”), challenges, "
+              "meetups, duels, club battles and weekly awards; we store your phone's time zone for meetup times. "
+              "Earlier: bike rides snapped to roads (OSRM), invites and your own photo on cards.\n\n"
               "Until you accept the new terms, I won't record workouts.",
     },
     "btn_policy": {
@@ -391,3 +391,276 @@ TEXTS = {
     "osm": {"ru": "© участники OpenStreetMap", "uk": "© учасники OpenStreetMap", "en": "© OpenStreetMap contributors"},
     "watermark": {"ru": "@beoutbot от lilaxy.com", "uk": "@beoutbot від lilaxy.com", "en": "@beoutbot by lilaxy.com"},
 }
+
+# --- активности в группах: челленджи, лента, сборы, дуэли, битва клубов, номинации, напоминания, inline ---
+TEXTS.update({
+    "cmd_challenge": {"ru": "Цель группы: /challenge 300 км", "uk": "Ціль групи: /challenge 300 км",
+                      "en": "Group goal: /challenge 300 km"},
+    "cmd_run": {"ru": "Сбор: /run сб 9:00 парк", "uk": "Збір: /run сб 9:00 парк", "en": "Meetup: /run sat 9:00 park"},
+    "cmd_duel": {"ru": "Дуэль: ответом на сообщение соперника", "uk": "Дуель: відповіддю на повідомлення суперника",
+                 "en": "Duel: as a reply to your rival's message"},
+    "cmd_clubwar": {"ru": "Битва клубов с другой группой", "uk": "Битва клубів з іншою групою",
+                    "en": "Club battle with another group"},
+    "cmd_reminders": {"ru": "Напоминания группе: on / off", "uk": "Нагадування групі: on / off",
+                      "en": "Group reminders: on / off"},
+    "cmd_help": {"ru": "Что я умею в группе", "uk": "Що я вмію в групі", "en": "What I can do in a group"},
+    "group_only": {
+        "ru": "Эта команда работает в группах: добавь меня в групповой чат и отправь её там.",
+        "uk": "Ця команда працює в групах: додай мене в груповий чат і надішли її там.",
+        "en": "This command works in groups: add me to a group chat and send it there.",
+    },
+    "only_admins": {
+        "ru": "Это могут сделать админы группы или автор.", "uk": "Це можуть зробити адміни групи або автор.",
+        "en": "Only the group's admins or the author can do this.",
+    },
+    "group_help": {
+        "ru": "Что можно делать в группе:\n"
+              "/top — рейтинг недели, месяца и серий; «Участвовать» — попасть в него, "
+              "«Публиковать» — показывать здесь свои тренировки\n"
+              "/challenge 300 км — общая цель на неделю, /challenge каждый 20 км — личная каждому\n"
+              "/run сб 9:00 парк — позвать на тренировку\n"
+              "/duel — ответом на сообщение соперника: кто больше км за неделю\n"
+              "/clubwar — битва с другой группой\n"
+              "/reminders off — не напоминать группе о тренировках\n\n"
+              "Тренировки записывает бот в личном чате: @{bot}",
+        "uk": "Що можна робити в групі:\n"
+              "/top — рейтинг тижня, місяця й серій; «Брати участь» — потрапити в нього, "
+              "«Публікувати» — показувати тут свої тренування\n"
+              "/challenge 300 км — спільна ціль на тиждень, /challenge кожен 20 км — особиста кожному\n"
+              "/run сб 9:00 парк — покликати на тренування\n"
+              "/duel — відповіддю на повідомлення суперника: хто більше км за тиждень\n"
+              "/clubwar — битва з іншою групою\n"
+              "/reminders off — не нагадувати групі про тренування\n\n"
+              "Тренування записує бот в особистому чаті: @{bot}",
+        "en": "What you can do in a group:\n"
+              "/top — weekly, monthly and streak leaderboards; “Join” to get on it, "
+              "“Post” to share your workouts here\n"
+              "/challenge 300 km — a shared weekly goal, /challenge each 20 km — a personal one for everyone\n"
+              "/run sat 9:00 park — invite people to a workout\n"
+              "/duel — as a reply to your rival's message: who covers more km in a week\n"
+              "/clubwar — a battle with another group\n"
+              "/reminders off — don't remind the group to train\n\n"
+              "Workouts are recorded by the bot in a private chat: @{bot}",
+    },
+    # рейтинг
+    "btn_tab_week": {"ru": "Неделя", "uk": "Тиждень", "en": "Week"},
+    "btn_tab_month": {"ru": "Месяц", "uk": "Місяць", "en": "Month"},
+    "btn_tab_streak": {"ru": "Серии", "uk": "Серії", "en": "Streaks"},
+    "rating_month": {"ru": "🏆 Рейтинг месяца", "uk": "🏆 Рейтинг місяця", "en": "🏆 Monthly leaderboard"},
+    "rating_streak": {"ru": "🔥 Серии: дней подряд с тренировкой", "uk": "🔥 Серії: днів поспіль із тренуванням",
+                      "en": "🔥 Streaks: days in a row with a workout"},
+    "streak_place": {"ru": "{n}. {name} — {days} дн. · {weeks} нед.", "uk": "{n}. {name} — {days} дн. · {weeks} тиж.",
+                     "en": "{n}. {name} — {days} d · {weeks} wk"},
+    "btn_feed_on": {"ru": "📣 Публиковать мои тренировки", "uk": "📣 Публікувати мої тренування",
+                    "en": "📣 Post my workouts"},
+    "btn_feed_off": {"ru": "🔕 Не публиковать", "uk": "🔕 Не публікувати", "en": "🔕 Stop posting"},
+    "feed_on": {
+        "ru": "Твои тренировки будут появляться в этой группе карточкой, и ты в рейтинге.",
+        "uk": "Твої тренування з'являтимуться в цій групі карткою, і ти в рейтингу.",
+        "en": "Your workouts will appear in this group as a card, and you're on the leaderboard.",
+    },
+    "feed_off": {"ru": "Больше не публикую твои тренировки здесь.", "uk": "Більше не публікую твої тренування тут.",
+                 "en": "I won't post your workouts here anymore."},
+    "feed_caption": {"ru": "{name}: {kind}, {km} км за {moving} · {speed}",
+                     "uk": "{name}: {kind}, {km} км за {moving} · {speed}",
+                     "en": "{name}: {kind}, {km} km in {moving} · {speed}"},
+    # номинации и картинка итогов
+    "nom_title": {"ru": "🏅 Номинации недели", "uk": "🏅 Номінації тижня", "en": "🏅 Awards of the week"},
+    "nom_longest": {"ru": "Самая длинная тренировка — {name}, {value} км",
+                    "uk": "Найдовше тренування — {name}, {value} км", "en": "Longest workout — {name}, {value} km"},
+    "nom_early": {"ru": "Ранняя пташка — {name}, старт в {value}", "uk": "Рання пташка — {name}, старт о {value}",
+                  "en": "Early bird — {name}, started at {value}"},
+    "nom_steady": {"ru": "Стабильность — {name}, {value} дн. с тренировками",
+                   "uk": "Стабільність — {name}, {value} дн. з тренуваннями",
+                   "en": "Consistency — {name}, {value} days with workouts"},
+    "nom_progress": {"ru": "Прогресс — {name}, +{value} км к прошлой неделе",
+                     "uk": "Прогрес — {name}, +{value} км до минулого тижня",
+                     "en": "Progress — {name}, +{value} km vs last week"},
+    "nom_short_longest": {"ru": "Самая длинная", "uk": "Найдовше", "en": "Longest"},
+    "nom_short_early": {"ru": "Ранняя пташка", "uk": "Рання пташка", "en": "Early bird"},
+    "nom_short_steady": {"ru": "Стабильность", "uk": "Стабільність", "en": "Consistency"},
+    "nom_short_progress": {"ru": "Прогресс", "uk": "Прогрес", "en": "Progress"},
+    "nom_value_longest": {"ru": "{value} км", "uk": "{value} км", "en": "{value} km"},
+    "nom_value_early": {"ru": "старт {value}", "uk": "старт {value}", "en": "start {value}"},
+    "nom_value_steady": {"ru": "{value} дн.", "uk": "{value} дн.", "en": "{value} days"},
+    "nom_value_progress": {"ru": "+{value} км", "uk": "+{value} км", "en": "+{value} km"},
+    "week_card_title": {"ru": "Итоги недели", "uk": "Підсумки тижня", "en": "Week results"},
+    "week_card_total": {"ru": "км вместе", "uk": "км разом", "en": "km together"},
+    "week_card_people": {"ru": "участников тренировались", "uk": "учасників тренувалися", "en": "members trained"},
+    # челленджи
+    "challenge_usage": {
+        "ru": "Как задать цель:\n/challenge 300 км — вместе за 7 дней\n/challenge каждый 20 км бег — каждому\n"
+              "/challenge 100 км 14 дней\nЗавершить: /challenge stop",
+        "uk": "Як задати ціль:\n/challenge 300 км — разом за 7 днів\n/challenge кожен 20 км біг — кожному\n"
+              "/challenge 100 км 14 днів\nЗавершити: /challenge stop",
+        "en": "How to set a goal:\n/challenge 300 km — together in 7 days\n/challenge each 20 km run — for everyone\n"
+              "/challenge 100 km 14 days\nStop: /challenge stop",
+    },
+    "challenge_exists": {"ru": "В группе уже идёт челлендж. Завершить его: /challenge stop",
+                         "uk": "У групі вже триває челендж. Завершити його: /challenge stop",
+                         "en": "A challenge is already running here. To stop it: /challenge stop"},
+    "challenge_none": {"ru": "Сейчас челленджа нет.", "uk": "Зараз челенджу немає.", "en": "There's no challenge now."},
+    "challenge_title": {"ru": "🎯 Челлендж: {goal} км вместе{kind} до {until}",
+                        "uk": "🎯 Челендж: {goal} км разом{kind} до {until}",
+                        "en": "🎯 Challenge: {goal} km together{kind} by {until}"},
+    "challenge_title_each": {"ru": "🎯 Челлендж: каждому по {goal} км{kind} до {until}",
+                             "uk": "🎯 Челендж: кожному по {goal} км{kind} до {until}",
+                             "en": "🎯 Challenge: {goal} km each{kind} by {until}"},
+    "challenge_done": {"ru": "{done} из {goal} км", "uk": "{done} з {goal} км", "en": "{done} of {goal} km"},
+    "challenge_line": {"ru": "{mark} {name} — {done} из {goal} км", "uk": "{mark} {name} — {done} з {goal} км",
+                       "en": "{mark} {name} — {done} of {goal} km"},
+    "challenge_footer": {
+        "ru": "Считаются тренировки участников рейтинга (/top → «Участвовать»).",
+        "uk": "Рахуються тренування учасників рейтингу (/top → «Брати участь»).",
+        "en": "Workouts of leaderboard members count (/top → “Join”).",
+    },
+    "challenge_reached": {"ru": "🎉 Цель достигнута: {goal} км вместе!", "uk": "🎉 Ціль досягнуто: {goal} км разом!",
+                          "en": "🎉 Goal reached: {goal} km together!"},
+    "challenge_reached_each": {"ru": "🎉 {name} выполняет цель челленджа: {goal} км!",
+                               "uk": "🎉 {name} виконує ціль челенджу: {goal} км!",
+                               "en": "🎉 {name} has hit the challenge goal: {goal} km!"},
+    "challenge_end_ok": {"ru": "🏁 Челлендж завершён, цель достигнута: {done} из {goal} км!",
+                         "uk": "🏁 Челендж завершено, ціль досягнуто: {done} з {goal} км!",
+                         "en": "🏁 Challenge over, goal reached: {done} of {goal} km!"},
+    "challenge_end_fail": {"ru": "🏁 Челлендж завершён: {done} из {goal} км. В следующий раз получится!",
+                           "uk": "🏁 Челендж завершено: {done} з {goal} км. Наступного разу вийде!",
+                           "en": "🏁 Challenge over: {done} of {goal} km. Next time!"},
+    "challenge_end_each": {"ru": "🏁 Челлендж завершён: цель выполнили {n} из {total}.",
+                           "uk": "🏁 Челендж завершено: ціль виконали {n} з {total}.",
+                           "en": "🏁 Challenge over: {n} of {total} hit the goal."},
+    "challenge_stopped": {"ru": "Челлендж остановлен.", "uk": "Челендж зупинено.", "en": "Challenge stopped."},
+    # сборы
+    "event_usage": {
+        "ru": "Как позвать на тренировку:\n/run сб 9:00 Парк Шевченко\n/run завтра 7:30 стадион, 10 км\n"
+              "/run 29.11 18:00 набережная\n\nДата — сегодня, завтра, день недели или 29.11; время — 9:00.",
+        "uk": "Як покликати на тренування:\n/run сб 9:00 Парк Шевченка\n/run завтра 7:30 стадіон, 10 км\n"
+              "/run 29.11 18:00 набережна\n\nДата — сьогодні, завтра, день тижня або 29.11; час — 9:00.",
+        "en": "How to invite people to a workout:\n/run sat 9:00 Central Park\n/run tomorrow 7:30 stadium, 10 km\n"
+              "/run 29.11 18:00 riverside\n\nDate: today, tomorrow, a weekday or 29.11; time: 9:00.",
+    },
+    "event_tz_hint": {
+        "ru": "Время — по {tz}. Чтобы я знал твой часовой пояс, открой трекер в чате с ботом.",
+        "uk": "Час — за {tz}. Щоб я знав твій часовий пояс, відкрий трекер у чаті з ботом.",
+        "en": "Times are in {tz}. Open the tracker in the chat with the bot so I know your time zone.",
+    },
+    "event_title": {"ru": "📍 Сбор: {place}\n🕒 {when}", "uk": "📍 Збір: {place}\n🕒 {when}",
+                    "en": "📍 Meetup: {place}\n🕒 {when}"},
+    "event_going": {"ru": "✅ Идут ({n}): {names}", "uk": "✅ Ідуть ({n}): {names}", "en": "✅ Going ({n}): {names}"},
+    "event_maybe": {"ru": "🤔 Может быть ({n}): {names}", "uk": "🤔 Можливо ({n}): {names}",
+                    "en": "🤔 Maybe ({n}): {names}"},
+    "event_nobody": {"ru": "Пока никто не отметился.", "uk": "Поки ніхто не відмітився.", "en": "No one has replied yet."},
+    "event_footer": {
+        "ru": "За час напомню, а в начале открою совместную тренировку: все увидят друг друга на карте.",
+        "uk": "За годину нагадаю, а на початку відкрию спільне тренування: всі побачать одне одного на мапі.",
+        "en": "I'll remind you an hour before and open a joint workout at the start, so everyone is on one map.",
+    },
+    "btn_go": {"ru": "✅ Иду", "uk": "✅ Іду", "en": "✅ Going"},
+    "btn_maybe": {"ru": "🤔 Может быть", "uk": "🤔 Можливо", "en": "🤔 Maybe"},
+    "btn_no": {"ru": "Не иду", "uk": "Не йду", "en": "Can't"},
+    "btn_cancel_event": {"ru": "Отменить сбор", "uk": "Скасувати збір", "en": "Cancel meetup"},
+    "rsvp_go": {"ru": "Отметил: идёшь 💪", "uk": "Відмітив: ідеш 💪", "en": "Got it: you're going 💪"},
+    "rsvp_maybe": {"ru": "Отметил: может быть", "uk": "Відмітив: можливо", "en": "Got it: maybe"},
+    "rsvp_no": {"ru": "Отметил: не идёшь", "uk": "Відмітив: не йдеш", "en": "Got it: not going"},
+    "event_cancelled": {"ru": "❌ Сбор отменён.", "uk": "❌ Збір скасовано.", "en": "❌ Meetup cancelled."},
+    "event_closed": {"ru": "Сбор уже прошёл или отменён.", "uk": "Збір уже минув або скасований.",
+                     "en": "This meetup is over or cancelled."},
+    "event_reminder": {"ru": "⏰ Через час: {place}, в {time}. Идут: {names}.",
+                       "uk": "⏰ За годину: {place}, о {time}. Ідуть: {names}.",
+                       "en": "⏰ In an hour: {place} at {time}. Going: {names}."},
+    "event_start": {
+        "ru": "🏁 Начинаем: {place}! Нажми кнопку и запусти трансляцию геопозиции в чате с ботом — "
+              "все будут на одной карте.",
+        "uk": "🏁 Починаємо: {place}! Натисни кнопку й запусти трансляцію геопозиції в чаті з ботом — "
+              "усі будуть на одній мапі.",
+        "en": "🏁 Let's go: {place}! Tap the button and share your live location in the chat with the bot — "
+              "everyone will be on one map.",
+    },
+    "btn_event_join": {"ru": "🗺 Совместная тренировка", "uk": "🗺 Спільне тренування", "en": "🗺 Joint workout"},
+    "event_summary": {"ru": "📊 Итоги сбора «{place}»: {n} чел., вместе {km} км",
+                      "uk": "📊 Підсумки збору «{place}»: {n} ос., разом {km} км",
+                      "en": "📊 Meetup “{place}”: {n} people, {km} km together"},
+    "event_summary_line": {"ru": "{name} — {km} км", "uk": "{name} — {km} км", "en": "{name} — {km} km"},
+    # дуэли
+    "duel_call": {"ru": "⚔️ {a} вызывает {b} на дуэль: кто больше км за {days} дн.{kind}",
+                  "uk": "⚔️ {a} викликає {b} на дуель: хто більше км за {days} дн.{kind}",
+                  "en": "⚔️ {a} challenges {b} to a duel: who covers more km in {days} days{kind}"},
+    "duel_call_open": {"ru": "⚔️ {a} вызывает на дуэль: кто больше км за {days} дн.{kind}. Кто примет вызов?",
+                       "uk": "⚔️ {a} викликає на дуель: хто більше км за {days} дн.{kind}. Хто прийме виклик?",
+                       "en": "⚔️ {a} is looking for a duel: who covers more km in {days} days{kind}. Who's in?"},
+    "btn_duel_accept": {"ru": "⚔️ Принять вызов", "uk": "⚔️ Прийняти виклик", "en": "⚔️ Accept"},
+    "btn_duel_decline": {"ru": "Отказаться", "uk": "Відмовитися", "en": "Decline"},
+    "duel_active": {"ru": "⚔️ Дуэль{kind} до {until}\n{a} — {a_km} км\n{b} — {b_km} км",
+                    "uk": "⚔️ Дуель{kind} до {until}\n{a} — {a_km} км\n{b} — {b_km} км",
+                    "en": "⚔️ Duel{kind} until {until}\n{a} — {a_km} km\n{b} — {b_km} km"},
+    "duel_win": {"ru": "🏆 Дуэль окончена: побеждает {winner} — {w_km} км против {l_km}!",
+                 "uk": "🏆 Дуель завершено: перемагає {winner} — {w_km} км проти {l_km}!",
+                 "en": "🏆 Duel over: {winner} wins — {w_km} km vs {l_km}!"},
+    "duel_draw": {"ru": "🤝 Дуэль окончена вничью: по {km} км.", "uk": "🤝 Дуель завершено внічию: по {km} км.",
+                  "en": "🤝 The duel is a draw: {km} km each."},
+    "duel_declined": {"ru": "Вызов отклонён.", "uk": "Виклик відхилено.", "en": "The challenge was declined."},
+    "duel_expired": {"ru": "Вызов никто не принял.", "uk": "Виклик ніхто не прийняв.", "en": "No one took the challenge."},
+    "duel_not_you": {"ru": "Этот вызов не тебе.", "uk": "Цей виклик не тобі.", "en": "This challenge isn't for you."},
+    "duel_self": {"ru": "Нельзя принять свой же вызов.", "uk": "Не можна прийняти власний виклик.",
+                  "en": "You can't accept your own challenge."},
+    "duel_closed": {"ru": "Этот вызов уже не действует.", "uk": "Цей виклик уже не діє.",
+                    "en": "This challenge is no longer open."},
+    # битва клубов
+    "war_created": {
+        "ru": "⚔️ Битва клубов на {days} дн.! Пусть админ другой группы отправит там:\n/clubwar {code}\n"
+              "Код действует сутки. Считаются км участников рейтинга обеих групп.",
+        "uk": "⚔️ Битва клубів на {days} дн.! Хай адмін іншої групи надішле там:\n/clubwar {code}\n"
+              "Код діє добу. Рахуються км учасників рейтингу обох груп.",
+        "en": "⚔️ A club battle for {days} days! Ask an admin of the other group to send there:\n/clubwar {code}\n"
+              "The code is valid for a day. Leaderboard members' km count for both groups.",
+    },
+    "war_active": {"ru": "⚔️ Битва клубов до {until}\n{a} — {a_km} км\n{b} — {b_km} км",
+                   "uk": "⚔️ Битва клубів до {until}\n{a} — {a_km} км\n{b} — {b_km} км",
+                   "en": "⚔️ Club battle until {until}\n{a} — {a_km} km\n{b} — {b_km} km"},
+    "war_win": {"ru": "🏆 Битва клубов окончена: побеждает «{winner}» — {w_km} км против {l_km}!",
+                "uk": "🏆 Битву клубів завершено: перемагає «{winner}» — {w_km} км проти {l_km}!",
+                "en": "🏆 Club battle over: “{winner}” wins — {w_km} km vs {l_km}!"},
+    "war_draw": {"ru": "🤝 Битва клубов окончена вничью: по {km} км.", "uk": "🤝 Битву клубів завершено внічию: по {km} км.",
+                 "en": "🤝 The club battle is a draw: {km} km each."},
+    "war_bad_code": {"ru": "Код не найден или устарел.", "uk": "Код не знайдено або він застарів.",
+                     "en": "Code not found or expired."},
+    "war_same": {"ru": "Это код вашей же группы — отправьте его в другую.", "uk": "Це код вашої ж групи — надішліть його в іншу.",
+                 "en": "That's your own group's code: send it to the other group."},
+    "war_expired": {"ru": "Битву никто не принял.", "uk": "Битву ніхто не прийняв.", "en": "No one accepted the battle."},
+    "group_untitled": {"ru": "Группа", "uk": "Група", "en": "Group"},
+    # напоминания
+    "nudge_idle": {"ru": "👟 Группа не тренировалась уже {days} дн. Кто сегодня?",
+                   "uk": "👟 Група не тренувалася вже {days} дн. Хто сьогодні?",
+                   "en": "👟 Nobody here has trained for {days} days. Who's going today?"},
+    "nudge_streak": {"ru": "🔥 Серия клуба — {days} дн. подряд, а сегодня ещё никто не тренировался. Сохраним?",
+                     "uk": "🔥 Серія клубу — {days} дн. поспіль, а сьогодні ще ніхто не тренувався. Збережемо?",
+                     "en": "🔥 The club streak is {days} days, but nobody has trained today. Shall we keep it?"},
+    "reminders_on": {"ru": "Напоминания группе включены.", "uk": "Нагадування групі ввімкнено.",
+                     "en": "Group reminders are on."},
+    "reminders_off": {"ru": "Напоминания группе выключены.", "uk": "Нагадування групі вимкнено.",
+                      "en": "Group reminders are off."},
+    "reminders_usage": {"ru": "/reminders on или /reminders off", "uk": "/reminders on або /reminders off",
+                        "en": "/reminders on or /reminders off"},
+    # inline
+    "inline_start": {"ru": "Открыть {app}", "uk": "Відкрити {app}", "en": "Open {app}"},
+    "inline_last": {"ru": "Моя последняя тренировка", "uk": "Моє останнє тренування", "en": "My last workout"},
+    "inline_week": {"ru": "Моя неделя", "uk": "Мій тиждень", "en": "My week"},
+    "inline_records": {"ru": "Мои рекорды", "uk": "Мої рекорди", "en": "My records"},
+    "inline_invite": {"ru": "Позвать в {app}", "uk": "Покликати в {app}", "en": "Invite to {app}"},
+    "inline_week_text": {"ru": "📅 Моя неделя в {app}: {n} трен., {km} км", "uk": "📅 Мій тиждень у {app}: {n} трен., {km} км",
+                         "en": "📅 My week in {app}: {n} workouts, {km} km"},
+    "inline_kind_line": {"ru": "• {kind}: {km} км", "uk": "• {kind}: {km} км", "en": "• {kind}: {km} km"},
+    "inline_records_text": {"ru": "🏆 Мои рекорды в {app}:", "uk": "🏆 Мої рекорди в {app}:", "en": "🏆 My records in {app}:"},
+    "inline_record_line": {"ru": "• {kind} — {what}: {value}", "uk": "• {kind} — {what}: {value}",
+                           "en": "• {kind} — {what}: {value}"},
+    "inline_no_records": {"ru": "Пока без рекордов", "uk": "Поки без рекордів", "en": "No records yet"},
+    "inline_invite_text": {"ru": "Записываю тренировки в {app} прямо в Telegram — присоединяйся: {link}",
+                           "uk": "Записую тренування в {app} просто в Telegram — приєднуйся: {link}",
+                           "en": "I track my workouts with {app} right in Telegram. Join me: {link}"},
+    "weekday_0": {"ru": "пн", "uk": "пн", "en": "Mon"},
+    "weekday_1": {"ru": "вт", "uk": "вт", "en": "Tue"},
+    "weekday_2": {"ru": "ср", "uk": "ср", "en": "Wed"},
+    "weekday_3": {"ru": "чт", "uk": "чт", "en": "Thu"},
+    "weekday_4": {"ru": "пт", "uk": "пт", "en": "Fri"},
+    "weekday_5": {"ru": "сб", "uk": "сб", "en": "Sat"},
+    "weekday_6": {"ru": "вс", "uk": "нд", "en": "Sun"},
+})

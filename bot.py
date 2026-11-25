@@ -26,6 +26,13 @@ from aiogram.exceptions import (
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     BotCommand,
+    BotCommandScopeAllGroupChats,
+    InlineQuery,
+    InlineQueryResultArticle,
+    InlineQueryResultPhoto,
+    InlineQueryResultsButton,
+    InputTextMessageContent,
+    ReplyParameters,
     BufferedInputFile,
     CallbackQuery,
     ErrorEvent,
@@ -39,13 +46,19 @@ from aiogram.types import (
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
 from auth import validate_init_data
-from cards import FIELDS, FORMATS, PANELS, PhotoError, map_height, map_view, render, render_card
+import clubs
+from cards import FIELDS, FORMATS, PANELS, PhotoError, map_height, map_view, render, render_card, render_week
 from i18n import DEFAULT_LANG, LANGS, pick, t
 from stats import clean, compute_stats, elevation_gain, fmt_duration, streaks
 from settings import (
     ACTIVITIES,
     APP_NAME,
     DEFAULT_ACCURACY_M,
+    DUEL_DAYS,
+    EVENT_REMIND_BEFORE_S,
+    EVENT_SUMMARY_AFTER_S,
+    FEED_MIN_KM,
+    INLINE_CARD_TTL_S,
     APP_VERSION,
     ELEVATION_API,
     ELEVATION_BATCH,
@@ -65,8 +78,13 @@ from settings import (
     MAP_TILES,
     MAP_TIMEOUT_S,
     MAP_USER_AGENT,
+    NUDGE_HOURS,
+    NUDGE_IDLE_DAYS,
+    NUDGE_STREAK_DAYS,
+    OPEN_CALL_TTL_S,
     RATING_POST_HOUR_UTC,
     RATING_TOP_N,
+    WAR_DAYS,
 )
 from storage import STAT_KEYS, Storage
 
@@ -83,7 +101,7 @@ ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 # Только для локальной отладки в обычном браузере, без Telegram. В проде не задавать!
 DEV_USER_ID = os.environ.get("DEV_USER_ID")
 # Поменял webapp/privacy.html — увеличь: бот попросит всех принять условия заново.
-POLICY_VERSION = 7
+POLICY_VERSION = 8
 PAGE_SIZE = 50
 NETWORK_RETRY_S = 10
 FLOOD_MAX_WAIT_S = 600
@@ -346,6 +364,7 @@ async def finish_and_report(bot, ride_id, ts=None, manual=False):
             [InlineKeyboardButton(text=t(lang, "btn_share"), callback_data=f"share:{ride['id']}")],
         ),
     )
+    await after_ride(bot, db.get_ride(ride_id))
 
 
 async def send_card(bot, ride, png=None):
@@ -689,7 +708,16 @@ async def on_location_update(message: Message):
         await finish_and_report(message.bot, ride["id"])
 
 
-# ---------- рейтинг в группах ----------
+# ---------- группы: рейтинг, лента, челленджи, сборы, дуэли, битва клубов ----------
+# В группе бот видит только команды и нажатия своих кнопок. Имя и цифры человека группа видит, только если он
+# сам нажал «Участвовать», «Публиковать», «Иду» или принял дуэль.
+
+GROUP_COMMANDS = ("top", "challenge", "run", "duel", "clubwar", "reminders", "help")
+
+
+def group_commands(lang):
+    return [BotCommand(command=name, description=t(lang, f"cmd_{name}")) for name in GROUP_COMMANDS]
+
 
 def week_start(now):
     """Понедельник 00:00 UTC текущей недели, unix time."""
@@ -697,6 +725,13 @@ def week_start(now):
     day = datetime.fromtimestamp(now, timezone.utc).date()
     monday = day - timedelta(days=day.weekday())
     return datetime(monday.year, monday.month, monday.day, tzinfo=timezone.utc).timestamp()
+
+
+def month_start(now, shift=0):
+    """1-е число месяца 00:00 UTC; shift — на сколько месяцев вперёд."""
+    d = datetime.fromtimestamp(now, timezone.utc)
+    year, month = divmod(d.year * 12 + d.month - 1 + shift, 12)
+    return datetime(year, month + 1, 1, tzinfo=timezone.utc).timestamp()
 
 
 async def member_name(bot, chat_id, user_id):
@@ -708,11 +743,85 @@ async def member_name(bot, chat_id, user_id):
     return None if member.status in ("left", "kicked") else member.user.full_name
 
 
-async def rating_text(bot, chat_id, since, title_key, lang):
-    """Рейтинг по дистанции за неделю с since, отдельно по типам. Простой текст: имена не экранировать."""
+async def shown_name(bot, chat_id, user_id, lang):
+    """Имя для текстов группы: вышел — «Участник»."""
+    return await member_name(bot, chat_id, user_id) or t(lang, "participant")
+
+
+async def is_admin_of(bot, chat_id, user_id):
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+    except TelegramAPIError:
+        return False
+    return member.status in ("creator", "administrator")
+
+
+def group_tz(chat_id):
+    row = db.group(chat_id)
+    return (row and row["tz"]) or 0
+
+
+def kind_suffix(lang, kind):
+    return f" · {t(lang, f'kind_{kind}').lower()}" if kind else ""
+
+
+def until_text(ts, tz):
+    return f"{clubs.local(ts, tz):%d.%m %H:%M}"
+
+
+async def in_group(message, lang):
+    """Команда для групп: в личке — подсказка. Заодно запоминаем группу, её название и часовой пояс."""
+    if message.chat.type not in GROUP_CHATS:
+        await message.answer(t(lang, "group_only"))
+        return False
+    db.add_group(message.chat.id, lang)
+    db.set_group(message.chat.id, title=message.chat.title)
+    tz = db.user_tz(message.from_user.id)
+    if tz is not None:
+        db.set_group(message.chat.id, tz=tz)
+    return True
+
+
+async def edit_text(bot, chat_id, message_id, text, markup=None):
+    """Обновить сообщение группы; «не изменилось» и удалённое сообщение — не ошибка."""
+    if not message_id:
+        return
+    try:
+        await bot.edit_message_text(text=text, chat_id=chat_id, message_id=message_id, reply_markup=markup)
+    except TelegramAPIError as e:
+        if "not modified" not in str(e):
+            logging.info("Сообщение %s/%s не обновлено: %r", chat_id, message_id, e)
+
+
+async def post(bot, chat_id, text, markup=None, reply_to=None):
+    """Сообщение в группу; бота удалили — забываем группу. Возвращает сообщение или None."""
+    try:
+        return await bot.send_message(
+            chat_id, text, reply_markup=markup,
+            reply_parameters=reply_to and ReplyParameters(message_id=reply_to, allow_sending_without_reply=True),
+        )
+    except TelegramForbiddenError:
+        db.forget_group(chat_id)
+    except TelegramAPIError:
+        logging.exception("Не удалось написать в группу %s", chat_id)
+    return None
+
+
+async def needs_consent(callback, lang):
+    """Нажал кнопку в группе, не приняв условия в боте — объясняем, что делать."""
+    if has_consent(callback.from_user.id):
+        return False
+    await callback.answer(t(lang, "rating_consent_first", bot=(await callback.bot.me()).username), show_alert=True)
+    return True
+
+
+# --- рейтинг: неделя, месяц, серии ---
+
+async def rating_text(bot, chat_id, since, until, title_key, lang):
+    """Рейтинг по дистанции за [since, until), отдельно по типам. Простой текст: имена не экранировать."""
     lines = [f"{t(lang, title_key)} {datetime.fromtimestamp(since, timezone.utc):%d.%m}–"
-             f"{datetime.fromtimestamp(since + 6 * 86400, timezone.utc):%d.%m}"]
-    rating = db.group_rating(chat_id, since, since + 7 * 86400)
+             f"{datetime.fromtimestamp(until - 1, timezone.utc):%d.%m}"]
+    rating = db.group_rating(chat_id, since, until)
     for kind in ACTIVITIES:
         places = []
         for user_id, km in rating.get(kind, []):
@@ -725,15 +834,55 @@ async def rating_text(bot, chat_id, since, title_key, lang):
             lines += ["", t(lang, f"kind_{kind}"), *places]
     if len(lines) == 1:
         lines += ["", t(lang, "rating_empty")]
-    lines += ["", t(lang, "rating_footer")]
-    return "\n".join(lines)
+    return lines
 
 
-def rating_keyboard(lang):
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=t(lang, "btn_join"), callback_data="rating:join"),
-        InlineKeyboardButton(text=t(lang, "btn_leave"), callback_data="rating:leave"),
-    ]])
+async def streak_text(bot, chat_id, now, lang):
+    """Серии участников: дней и недель подряд с тренировкой (по их часовому поясу)."""
+    rides = db.group_rides(chat_id, now - 400 * 86400, now + 1)
+    starts = {}
+    for r in rides:
+        starts.setdefault(r["user_id"], []).append(r["started_at"])
+    rows = []
+    for user_id, ts in starts.items():
+        tz = db.user_tz(user_id) or 0
+        days, weeks = streaks([local_date(x, tz) for x in ts], local_date(now, tz))
+        if days or weeks:
+            rows.append((days, weeks, user_id))
+    lines = [t(lang, "rating_streak")]
+    places = []
+    for days, weeks, user_id in sorted(rows, reverse=True):
+        name = await member_name(bot, chat_id, user_id)
+        if name:
+            places.append(t(lang, "streak_place", n=len(places) + 1, name=name, days=days, weeks=weeks))
+        if len(places) == RATING_TOP_N:
+            break
+    return lines + ([""] + places if places else ["", t(lang, "rating_empty")])
+
+
+async def top_text(bot, chat_id, tab, lang, now):
+    if tab == "month":
+        lines = await rating_text(bot, chat_id, month_start(now), month_start(now, 1), "rating_month", lang)
+    elif tab == "streak":
+        lines = await streak_text(bot, chat_id, now, lang)
+    else:
+        lines = await rating_text(bot, chat_id, week_start(now), week_start(now) + 7 * 86400, "rating_week", lang)
+    return "\n".join(lines + ["", t(lang, "rating_footer")])
+
+
+def top_keyboard(lang, tab="week"):
+    tabs = [InlineKeyboardButton(text=("• " if key == tab else "") + t(lang, f"btn_tab_{key}"), callback_data=f"top:{key}")
+            for key in ("week", "month", "streak")]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        tabs,
+        [InlineKeyboardButton(text=t(lang, "btn_join"), callback_data="rating:join"),
+         InlineKeyboardButton(text=t(lang, "btn_leave"), callback_data="rating:leave")],
+        [InlineKeyboardButton(text=t(lang, "btn_feed_on"), callback_data="feed:on"),
+         InlineKeyboardButton(text=t(lang, "btn_feed_off"), callback_data="feed:off")],
+    ])
+
+
+rating_keyboard = top_keyboard
 
 
 @dp.message(Command("top"))
@@ -742,26 +891,86 @@ async def cmd_top(message: Message):
     if message.chat.type not in GROUP_CHATS:
         await message.answer(t(lang, "top_private"))
         return
-    db.add_group(message.chat.id, lang)  # на этом языке пойдёт и автопост по понедельникам
-    text = await rating_text(message.bot, message.chat.id, week_start(time.time()), "rating_week", lang)
-    await message.answer(text, reply_markup=rating_keyboard(lang))
+    await in_group(message, lang)  # на этом языке пойдёт и автопост по понедельникам
+    await message.answer(await top_text(message.bot, message.chat.id, "week", lang, time.time()),
+                         reply_markup=top_keyboard(lang))
+
+
+@dp.callback_query(F.data.regexp(r"^top:(week|month|streak)$"))
+async def on_top_tab(callback: CallbackQuery):
+    lang = db.group_lang(callback.message.chat.id)
+    tab = callback.data.split(":")[1]
+    await edit_text(callback.bot, callback.message.chat.id, callback.message.message_id,
+                    await top_text(callback.bot, callback.message.chat.id, tab, lang, time.time()),
+                    top_keyboard(lang, tab))
+    await callback.answer()
 
 
 @dp.callback_query(F.data.in_({"rating:join", "rating:leave"}))
 async def on_rating(callback: CallbackQuery):
     user_id, join = callback.from_user.id, callback.data == "rating:join"
     lang = lang_of(callback.from_user)
-    if join and not has_consent(user_id):
-        await callback.answer(
-            t(lang, "rating_consent_first", bot=(await callback.bot.me()).username), show_alert=True,
-        )
+    if join and await needs_consent(callback, lang):
         return
     db.set_group_member(callback.message.chat.id, user_id, join)
     await callback.answer(t(lang, "rating_joined" if join else "rating_left"), show_alert=True)
 
 
+@dp.callback_query(F.data.in_({"feed:on", "feed:off"}))
+async def on_feed(callback: CallbackQuery):
+    on = callback.data == "feed:on"
+    lang = lang_of(callback.from_user)
+    if on and await needs_consent(callback, lang):
+        return
+    db.set_feed(callback.message.chat.id, callback.from_user.id, on)
+    await callback.answer(t(lang, "feed_on" if on else "feed_off"), show_alert=True)
+
+
+@dp.message(Command("help"), F.chat.type.in_(GROUP_CHATS))
+async def cmd_group_help(message: Message):
+    lang = lang_of(message.from_user)
+    await in_group(message, lang)
+    await message.answer(t(lang, "group_help", bot=(await message.bot.me()).username))
+
+
+# --- итоги недели: рейтинг, номинации, картинка ---
+
+async def week_summary(bot, chat_id, since, lang):
+    """Текст итогов недели с номинациями и PNG-картинка (None — никто не тренировался)."""
+    until = since + 7 * 86400
+    lines = await rating_text(bot, chat_id, since, until, "rating_results", lang)
+    rides = db.group_rides(chat_id, since, until)
+    prev = db.group_km(chat_id, since - 7 * 86400, since)
+    awards = clubs.nominations(rides, prev, lambda user_id: db.user_tz(user_id) or 0)
+    award_lines, award_cells = [], []
+    for key, user_id, value in awards:
+        name = await member_name(bot, chat_id, user_id)
+        if not name:
+            continue
+        award_lines.append(t(lang, key, name=name, value=value))
+        short = key.removeprefix("nom_")
+        award_cells.append((t(lang, f"nom_short_{short}"), name, t(lang, f"nom_value_{short}", value=value)))
+    if award_lines:
+        lines += ["", t(lang, "nom_title"), *award_lines]
+    lines += ["", t(lang, "rating_footer")]
+    km = db.group_km(chat_id, since, until)
+    rows = []
+    for user_id, value in sorted(km.items(), key=lambda kv: -kv[1]):
+        name = await member_name(bot, chat_id, user_id)
+        if name and value > 0:
+            rows.append((name, value))
+    image = None
+    if rows:
+        title = (db.group(chat_id) or {"title": None})["title"] or t(lang, "group_untitled")
+        period = (f"{datetime.fromtimestamp(since, timezone.utc):%d.%m}–"
+                  f"{datetime.fromtimestamp(until - 1, timezone.utc):%d.%m}")
+        image = await asyncio.to_thread(render_week, title, period, sum(v for _, v in rows), len(rows), rows,
+                                        award_cells, lang)
+    return "\n".join(lines), image
+
+
 async def post_weekly_ratings(bot, now):
-    """По понедельникам — итоги прошлой недели во все группы, где есть участники."""
+    """По понедельникам — итоги прошлой недели во все группы, где есть участники: картинка и рейтинг."""
     dt = datetime.fromtimestamp(now, timezone.utc)
     if dt.weekday() != 0 or dt.hour < RATING_POST_HOUR_UTC:
         return
@@ -770,12 +979,584 @@ async def post_weekly_ratings(bot, now):
         db.mark_posted(chat_id, week)  # до отправки: сбой не повторяется каждую минуту
         try:
             lang = db.group_lang(chat_id)
-            text = await rating_text(bot, chat_id, week_start(now) - 7 * 86400, "rating_results", lang)
-            await bot.send_message(chat_id, text, reply_markup=rating_keyboard(lang))
+            text, image = await week_summary(bot, chat_id, week_start(now) - 7 * 86400, lang)
+            if image:
+                await bot.send_photo(chat_id, BufferedInputFile(image, filename="beout-week.png"))
+            await bot.send_message(chat_id, text, reply_markup=top_keyboard(lang))
         except TelegramForbiddenError:
             db.forget_group(chat_id)  # бота удалили из группы
         except TelegramAPIError:
             logging.exception("Не удалось отправить рейтинг в %s", chat_id)
+
+
+# --- лента: тренировки участников, которые включили «Публиковать» ---
+
+async def post_to_feeds(bot, ride):
+    chats = db.feed_groups(ride["user_id"])
+    stats = stats_of(ride)
+    if not chats or stats["distance_km"] < FEED_MIN_KM:
+        return
+    full = compute_stats(db.get_points(ride["id"]), db.get_weight(ride["user_id"]), ride["kind"])
+    tiles = await card_tiles(full["track"])
+    file = None
+    for chat_id in chats:
+        lang = db.group_lang(chat_id)
+        name = await member_name(bot, chat_id, ride["user_id"])
+        if not name:
+            continue
+        if file is None:  # рисуем один раз — на языке первой группы
+            png = await asyncio.to_thread(render_card, ride["kind"], full, record_labels(ride, lang), tiles, lang)
+            file = BufferedInputFile(png, filename="beout.png")
+        caption = t(lang, "feed_caption", name=name, kind=t(lang, f"kind_{ride['kind']}").lower(),
+                    km=stats["distance_km"], moving=fmt_duration(stats["moving_s"]), speed=speed_line(stats, lang))
+        link = f"https://t.me/{(await bot.me()).username}?start=feed"
+        try:
+            sent = await bot.send_photo(chat_id, file, caption=caption, reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text=t(lang, "btn_card_open"), url=link)]]))
+            file = sent.photo[-1].file_id  # дальше — тем же файлом, без повторной загрузки
+        except TelegramForbiddenError:
+            db.forget_group(chat_id)
+        except TelegramAPIError:
+            logging.exception("Не удалось опубликовать тренировку в %s", chat_id)
+
+
+# --- челленджи ---
+
+async def challenge_text(bot, challenge, lang):
+    tz = group_tz(challenge["chat_id"])
+    goal = clubs.fmt_km(challenge["goal_km"])
+    km = db.group_km(challenge["chat_id"], challenge["starts_at"], challenge["ends_at"], challenge["kind"])
+    kind = kind_suffix(lang, challenge["kind"])
+    until = until_text(challenge["ends_at"], tz)
+    if not challenge["each"]:
+        done = sum(km.values())
+        lines = [t(lang, "challenge_title", goal=goal, kind=kind, until=until),
+                 clubs.progress_bar(done, challenge["goal_km"]),
+                 t(lang, "challenge_done", done=clubs.fmt_km(done), goal=goal)]
+    else:
+        lines = [t(lang, "challenge_title_each", goal=goal, kind=kind, until=until), ""]
+        for user_id in sorted(db.group_members(challenge["chat_id"]), key=lambda u: -km.get(u, 0)):
+            done = km.get(user_id, 0)
+            name = await member_name(bot, challenge["chat_id"], user_id)
+            if name:
+                lines.append(t(lang, "challenge_line", mark="✅" if done >= challenge["goal_km"] else "▫️",
+                               name=name, done=clubs.fmt_km(done), goal=goal))
+    return "\n".join(lines + ["", t(lang, "challenge_footer")])
+
+
+@dp.message(Command("challenge"))
+async def cmd_challenge(message: Message, command: CommandObject):
+    lang = lang_of(message.from_user)
+    if not await in_group(message, lang):
+        return
+    chat_id, args = message.chat.id, (command.args or "").strip()
+    current = db.active_challenge(chat_id)
+    if args.lower() in ("stop", "стоп"):
+        if not current:
+            await message.answer(t(lang, "challenge_none"))
+        elif current["creator_id"] != message.from_user.id and not await is_admin_of(message.bot, chat_id,
+                                                                                   message.from_user.id):
+            await message.answer(t(lang, "only_admins"))
+        else:
+            db.update_challenge(current["id"], closed=1)
+            await message.answer(t(lang, "challenge_stopped"))
+        return
+    if current:
+        await message.answer(t(lang, "challenge_exists"))
+        return
+    parsed = clubs.parse_challenge(args)
+    if not parsed:
+        await message.answer(t(lang, "challenge_usage"))
+        return
+    goal, kind, each, days = parsed
+    challenge = db.create_challenge(chat_id, message.from_user.id, goal, kind, each, days)
+    sent = await message.answer(await challenge_text(message.bot, challenge, lang), reply_markup=top_keyboard(lang))
+    db.update_challenge(challenge["id"], message_id=sent.message_id)
+
+
+async def refresh_challenge(bot, challenge, ride=None):
+    """Обновить прогресс; общая цель достигнута — поздравить один раз; личная — поздравить того, кто её добил."""
+    lang = db.group_lang(challenge["chat_id"])
+    challenge = db.get_challenge(challenge["id"])
+    await edit_text(bot, challenge["chat_id"], challenge["message_id"], await challenge_text(bot, challenge, lang),
+                    top_keyboard(lang))
+    km = db.group_km(challenge["chat_id"], challenge["starts_at"], challenge["ends_at"], challenge["kind"])
+    goal = clubs.fmt_km(challenge["goal_km"])
+    if not challenge["each"] and not challenge["reached_at"] and sum(km.values()) >= challenge["goal_km"]:
+        db.update_challenge(challenge["id"], reached_at=time.time())
+        await post(bot, challenge["chat_id"], t(lang, "challenge_reached", goal=goal), reply_to=challenge["message_id"])
+    if challenge["each"] and ride and ride["user_id"] in km:
+        after = km[ride["user_id"]]
+        before = after - (stats_of(ride)["distance_km"] if not challenge["kind"] or ride["kind"] == challenge["kind"] else 0)
+        if before < challenge["goal_km"] <= after:
+            name = await shown_name(bot, challenge["chat_id"], ride["user_id"], lang)
+            await post(bot, challenge["chat_id"], t(lang, "challenge_reached_each", name=name, goal=goal),
+                       reply_to=challenge["message_id"])
+
+
+async def close_challenge(bot, challenge):
+    lang = db.group_lang(challenge["chat_id"])
+    db.update_challenge(challenge["id"], closed=1)
+    km = db.group_km(challenge["chat_id"], challenge["starts_at"], challenge["ends_at"], challenge["kind"])
+    goal, done = challenge["goal_km"], sum(km.values())
+    if challenge["each"]:
+        members = db.group_members(challenge["chat_id"])
+        text = t(lang, "challenge_end_each", n=sum(1 for u in members if km.get(u, 0) >= goal), total=len(members))
+    else:
+        text = t(lang, "challenge_end_ok" if done >= goal else "challenge_end_fail",
+                 done=clubs.fmt_km(done), goal=clubs.fmt_km(goal))
+    await post(bot, challenge["chat_id"], text, reply_to=challenge["message_id"])
+
+
+# --- сборы на тренировку ---
+
+def event_keyboard(event, lang):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t(lang, "btn_go"), callback_data=f"ev:{event['id']}:go"),
+         InlineKeyboardButton(text=t(lang, "btn_maybe"), callback_data=f"ev:{event['id']}:maybe"),
+         InlineKeyboardButton(text=t(lang, "btn_no"), callback_data=f"ev:{event['id']}:no")],
+        [InlineKeyboardButton(text=t(lang, "btn_cancel_event"), callback_data=f"ev:{event['id']}:cancel")],
+    ])
+
+
+async def names(bot, chat_id, user_ids, lang):
+    return ", ".join([await shown_name(bot, chat_id, u, lang) for u in user_ids])
+
+
+async def event_text(bot, event, lang):
+    when = clubs.local(event["starts_at"], event["tz"])
+    weekday = t(lang, f"weekday_{when.weekday()}")
+    lines = [t(lang, "event_title", place=event["place"],
+               when=f"{weekday} {when:%d.%m} · {when:%H:%M} ({clubs.tz_label(event['tz'])})"), ""]
+    answers = db.rsvps(event["id"])
+    if answers.get("go"):
+        lines.append(t(lang, "event_going", n=len(answers["go"]), names=await names(bot, event["chat_id"], answers["go"], lang)))
+    if answers.get("maybe"):
+        lines.append(t(lang, "event_maybe", n=len(answers["maybe"]),
+                       names=await names(bot, event["chat_id"], answers["maybe"], lang)))
+    if not answers.get("go") and not answers.get("maybe"):
+        lines.append(t(lang, "event_nobody"))
+    if event["stage"] < 0:
+        lines += ["", t(lang, "event_cancelled")]
+    elif event["stage"] < 2:
+        lines += ["", t(lang, "event_footer")]
+    return "\n".join(lines)
+
+
+@dp.message(Command("run"))
+async def cmd_run(message: Message, command: CommandObject):
+    lang = lang_of(message.from_user)
+    if not await in_group(message, lang):
+        return
+    user_tz = db.user_tz(message.from_user.id)
+    tz = user_tz if user_tz is not None else group_tz(message.chat.id)
+    parsed = clubs.parse_event(command.args, time.time(), tz)
+    if not parsed:
+        await message.answer(t(lang, "event_usage"))
+        return
+    event = db.create_event(message.chat.id, message.from_user.id, parsed[0], tz, parsed[1][:200])
+    if has_consent(message.from_user.id):
+        db.set_rsvp(event["id"], message.from_user.id, "go")  # кто зовёт — тот идёт
+    text = await event_text(message.bot, event, lang)
+    if user_tz is None:
+        text += "\n\n" + t(lang, "event_tz_hint", tz=clubs.tz_label(tz))
+    sent = await message.answer(text, reply_markup=event_keyboard(event, lang))
+    db.update_event(event["id"], message_id=sent.message_id)
+
+
+@dp.callback_query(F.data.regexp(r"^ev:\d+:(go|maybe|no|cancel)$"))
+async def on_event(callback: CallbackQuery):
+    _, event_id, action = callback.data.split(":")
+    event = db.get_event(int(event_id))
+    lang = lang_of(callback.from_user)
+    if not event or event["stage"] < 0 or event["stage"] >= 2:
+        await callback.answer(t(lang, "event_closed"), show_alert=True)
+        return
+    group_lang = db.group_lang(event["chat_id"])
+    if action == "cancel":
+        if event["creator_id"] != callback.from_user.id and not await is_admin_of(
+                callback.bot, event["chat_id"], callback.from_user.id):
+            await callback.answer(t(lang, "only_admins"), show_alert=True)
+            return
+        db.update_event(event["id"], stage=-1)
+        await edit_text(callback.bot, event["chat_id"], event["message_id"],
+                        await event_text(callback.bot, db.get_event(event["id"]), group_lang))
+        await callback.answer()
+        return
+    if await needs_consent(callback, lang):
+        return
+    db.set_rsvp(event["id"], callback.from_user.id, action)
+    await edit_text(callback.bot, event["chat_id"], event["message_id"],
+                    await event_text(callback.bot, event, group_lang), event_keyboard(event, group_lang))
+    await callback.answer(t(lang, f"rsvp_{action}"))
+
+
+async def advance_event(bot, event, stage, now):
+    """Этапы сбора: 1 — напомнить за час, 2 — открыть совместную тренировку, 3 — итоги."""
+    lang = db.group_lang(event["chat_id"])
+    db.update_event(event["id"], stage=stage)
+    going = db.rsvps(event["id"]).get("go", [])
+    when = clubs.local(event["starts_at"], event["tz"])
+    if stage == 1 and going:
+        await post(bot, event["chat_id"], t(lang, "event_reminder", place=event["place"], time=f"{when:%H:%M}",
+                                            names=await names(bot, event["chat_id"], going, lang)),
+                   reply_to=event["message_id"])
+    elif stage == 2:
+        await edit_text(bot, event["chat_id"], event["message_id"], await event_text(bot, db.get_event(event["id"]), lang))
+        if not going:
+            return
+        session = db.create_session(event["creator_id"], now)
+        db.update_event(event["id"], session_id=session["id"])
+        await post(bot, event["chat_id"], t(lang, "event_start", place=event["place"]), InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text=t(lang, "btn_event_join"), url=await session_link(bot, session))]]),
+            reply_to=event["message_id"])
+    elif stage == 3 and event["session_id"]:
+        km = {}
+        for ride in db.session_rides(event["session_id"]):
+            if ride["ended_at"] is not None:
+                km[ride["user_id"]] = km.get(ride["user_id"], 0) + (ride["distance_km"] or 0)
+        km = {u: v for u, v in km.items() if v > 0}
+        if not km:
+            return
+        lines = [t(lang, "event_summary", place=event["place"], n=len(km), km=clubs.fmt_km(sum(km.values())))]
+        for user_id, value in sorted(km.items(), key=lambda kv: -kv[1]):
+            lines.append(t(lang, "event_summary_line", name=await shown_name(bot, event["chat_id"], user_id, lang),
+                           km=clubs.fmt_km(value)))
+        await post(bot, event["chat_id"], "\n".join(lines), reply_to=event["message_id"])
+
+
+# --- дуэли ---
+
+def duel_days_kind(args):
+    kind, days = None, DUEL_DAYS
+    tokens = (args or "").split()
+    for i, tok in enumerate(tokens):
+        if clubs.kind_of(tok):
+            kind = clubs.kind_of(tok)
+        elif tok.isdigit() and 1 <= int(tok) <= 30:
+            days = int(tok)
+    return kind, days
+
+
+async def duel_text(bot, duel, lang):
+    kind = kind_suffix(lang, duel["kind"])
+    a = await shown_name(bot, duel["chat_id"], duel["a_id"], lang)
+    if duel["status"] == "open":
+        if duel["b_id"]:
+            b = await shown_name(bot, duel["chat_id"], duel["b_id"], lang)
+            return t(lang, "duel_call", a=a, b=b, days=duel["days"], kind=kind)
+        return t(lang, "duel_call_open", a=a, days=duel["days"], kind=kind)
+    b = await shown_name(bot, duel["chat_id"], duel["b_id"], lang)
+    if duel["status"] == "declined":
+        return t(lang, "duel_call", a=a, b=b, days=duel["days"], kind=kind) + "\n\n" + t(lang, "duel_declined")
+    a_km = db.user_km(duel["a_id"], duel["starts_at"], duel["ends_at"], duel["kind"])
+    b_km = db.user_km(duel["b_id"], duel["starts_at"], duel["ends_at"], duel["kind"])
+    return t(lang, "duel_active", kind=kind, until=until_text(duel["ends_at"], group_tz(duel["chat_id"])),
+             a=a, b=b, a_km=clubs.fmt_km(a_km), b_km=clubs.fmt_km(b_km))
+
+
+def duel_keyboard(duel, lang):
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=t(lang, "btn_duel_accept"), callback_data=f"duel:{duel['id']}:accept"),
+        InlineKeyboardButton(text=t(lang, "btn_duel_decline"), callback_data=f"duel:{duel['id']}:decline"),
+    ]])
+
+
+@dp.message(Command("duel"))
+async def cmd_duel(message: Message, command: CommandObject):
+    lang = lang_of(message.from_user)
+    if not await in_group(message, lang):
+        return
+    if not has_consent(message.from_user.id):
+        await message.answer(t(lang, "rating_consent_first", bot=(await message.bot.me()).username))
+        return
+    rival = message.reply_to_message and message.reply_to_message.from_user
+    if rival and (rival.is_bot or rival.id == message.from_user.id):
+        rival = None
+    kind, days = duel_days_kind(command.args)
+    duel = db.create_duel(message.chat.id, message.from_user.id, rival and rival.id, kind, days)
+    sent = await message.answer(await duel_text(message.bot, duel, lang), reply_markup=duel_keyboard(duel, lang))
+    db.update_duel(duel["id"], message_id=sent.message_id)
+
+
+@dp.callback_query(F.data.regexp(r"^duel:\d+:(accept|decline)$"))
+async def on_duel(callback: CallbackQuery):
+    _, duel_id, action = callback.data.split(":")
+    duel = db.get_duel(int(duel_id))
+    lang = lang_of(callback.from_user)
+    user_id = callback.from_user.id
+    if not duel or duel["status"] != "open":
+        await callback.answer(t(lang, "duel_closed"), show_alert=True)
+        return
+    group_lang = db.group_lang(duel["chat_id"])
+    if action == "decline":
+        if user_id not in (duel["a_id"], duel["b_id"]):
+            await callback.answer(t(lang, "duel_not_you"), show_alert=True)
+            return
+        db.update_duel(duel["id"], status="declined", b_id=duel["b_id"] or user_id)
+    else:
+        if user_id == duel["a_id"]:
+            await callback.answer(t(lang, "duel_self"), show_alert=True)
+            return
+        if duel["b_id"] and duel["b_id"] != user_id:
+            await callback.answer(t(lang, "duel_not_you"), show_alert=True)
+            return
+        if await needs_consent(callback, lang):
+            return
+        now = time.time()
+        db.update_duel(duel["id"], b_id=user_id, starts_at=now, ends_at=now + duel["days"] * 86400, status="active")
+    await edit_text(callback.bot, duel["chat_id"], duel["message_id"],
+                    await duel_text(callback.bot, db.get_duel(duel["id"]), group_lang))
+    await callback.answer()
+
+
+async def finish_duel(bot, duel):
+    lang = db.group_lang(duel["chat_id"])
+    if duel["status"] == "open":
+        db.update_duel(duel["id"], status="declined")
+        await edit_text(bot, duel["chat_id"], duel["message_id"],
+                        await duel_text(bot, duel, lang) + "\n\n" + t(lang, "duel_expired"))
+        return
+    db.update_duel(duel["id"], status="done")
+    km = {u: db.user_km(u, duel["starts_at"], duel["ends_at"], duel["kind"]) for u in (duel["a_id"], duel["b_id"])}
+    (w, w_km), (_, l_km) = sorted(km.items(), key=lambda kv: -kv[1])
+    if w_km == l_km:
+        text = t(lang, "duel_draw", km=clubs.fmt_km(w_km))
+    else:
+        text = t(lang, "duel_win", winner=await shown_name(bot, duel["chat_id"], w, lang),
+                 w_km=clubs.fmt_km(w_km), l_km=clubs.fmt_km(l_km))
+    await post(bot, duel["chat_id"], text, reply_to=duel["message_id"])
+
+
+# --- битва клубов ---
+
+def group_title(chat_id, lang):
+    row = db.group(chat_id)
+    return (row and row["title"]) or t(lang, "group_untitled")
+
+
+def war_km(war, chat_id):
+    return sum(db.group_km(chat_id, war["starts_at"], war["ends_at"]).values())
+
+
+def war_text(war, chat_id, lang):
+    """С точки зрения группы chat_id: она — первая строка."""
+    other = war["b_chat"] if chat_id == war["a_chat"] else war["a_chat"]
+    return t(lang, "war_active", until=until_text(war["ends_at"], group_tz(chat_id)),
+             a=group_title(chat_id, lang), a_km=clubs.fmt_km(war_km(war, chat_id)),
+             b=group_title(other, lang), b_km=clubs.fmt_km(war_km(war, other)))
+
+
+@dp.message(Command("clubwar"))
+async def cmd_clubwar(message: Message, command: CommandObject):
+    lang = lang_of(message.from_user)
+    if not await in_group(message, lang):
+        return
+    if not await is_admin_of(message.bot, message.chat.id, message.from_user.id):
+        await message.answer(t(lang, "only_admins"))
+        return
+    tokens = (command.args or "").split()
+    code = next((tok for tok in tokens if any(ch.isalpha() for ch in tok)), None)
+    days = next((int(tok) for tok in tokens if tok.isdigit() and 1 <= int(tok) <= 30), WAR_DAYS)
+    if not code:
+        war = db.create_war(message.chat.id, days)
+        await message.answer(t(lang, "war_created", days=days, code=war["code"]))
+        return
+    war = db.war_by_code(code)
+    if not war:
+        await message.answer(t(lang, "war_bad_code"))
+        return
+    if war["a_chat"] == message.chat.id:
+        await message.answer(t(lang, "war_same"))
+        return
+    now = time.time()
+    db.update_war(war["id"], b_chat=message.chat.id, starts_at=now, ends_at=now + war["days"] * 86400, status="active")
+    war = db.get_war(war["id"])
+    for chat_id, column in ((war["a_chat"], "a_msg"), (war["b_chat"], "b_msg")):
+        sent = await post(message.bot, chat_id, war_text(war, chat_id, db.group_lang(chat_id)))
+        if sent:
+            db.update_war(war["id"], **{column: sent.message_id})
+
+
+async def refresh_war(bot, war):
+    war = db.get_war(war["id"])
+    for chat_id, column in ((war["a_chat"], "a_msg"), (war["b_chat"], "b_msg")):
+        await edit_text(bot, chat_id, war[column], war_text(war, chat_id, db.group_lang(chat_id)))
+
+
+async def finish_war(bot, war):
+    db.update_war(war["id"], status="done")
+    if not war["b_chat"]:
+        return  # код никто не ввёл
+    for chat_id, column in ((war["a_chat"], "a_msg"), (war["b_chat"], "b_msg")):
+        lang = db.group_lang(chat_id)
+        scores = sorted(((war_km(war, c), group_title(c, lang)) for c in (war["a_chat"], war["b_chat"])), reverse=True)
+        (w_km, winner), (l_km, _) = scores
+        text = (t(lang, "war_draw", km=clubs.fmt_km(w_km)) if w_km == l_km
+                else t(lang, "war_win", winner=winner, w_km=clubs.fmt_km(w_km), l_km=clubs.fmt_km(l_km)))
+        await post(bot, chat_id, text, reply_to=war[column])
+
+
+# --- напоминания группе ---
+
+@dp.message(Command("reminders"))
+async def cmd_reminders(message: Message, command: CommandObject):
+    lang = lang_of(message.from_user)
+    if not await in_group(message, lang):
+        return
+    arg = (command.args or "").strip().lower()
+    if arg not in ("on", "off"):
+        await message.answer(t(lang, "reminders_usage"))
+        return
+    if not await is_admin_of(message.bot, message.chat.id, message.from_user.id):
+        await message.answer(t(lang, "only_admins"))
+        return
+    db.set_group(message.chat.id, reminders=int(arg == "on"))
+    await message.answer(t(lang, f"reminders_{arg}"))
+
+
+async def nudge_groups(bot, now):
+    """Вечером (17–21 по времени группы): давно не тренировались — позвать; серия клуба под угрозой — напомнить."""
+    for group in db.groups_for_nudge():
+        tz = group["tz"] or 0
+        local_now = clubs.local(now, tz)
+        if not NUDGE_HOURS[0] <= local_now.hour < NUDGE_HOURS[1]:
+            continue
+        last_nudge = group["nudged_at"] or 0
+        rides = db.group_rides(group["chat_id"], now - 60 * 86400, now + 1)
+        if not rides:
+            continue  # группа ещё ни разу не тренировалась — не надоедаем
+        idle_days = int((now - rides[-1]["started_at"]) // 86400)
+        lang = group["lang"] or DEFAULT_LANG
+        text = None
+        if idle_days >= NUDGE_IDLE_DAYS and now - last_nudge >= NUDGE_IDLE_DAYS * 86400:
+            text = t(lang, "nudge_idle", days=idle_days)
+        elif now - last_nudge >= 20 * 3600:
+            days = {clubs.local(r["started_at"], tz).date() for r in rides}
+            today = local_now.date()
+            streak, day = 0, today - timedelta(days=1)
+            while day in days:
+                streak, day = streak + 1, day - timedelta(days=1)
+            if today not in days and streak >= NUDGE_STREAK_DAYS:
+                text = t(lang, "nudge_streak", days=streak)
+        if text:
+            db.set_group(group["chat_id"], nudged_at=now)
+            await post(bot, group["chat_id"], text)
+
+
+# --- после каждой тренировки и по таймеру ---
+
+async def after_ride(bot, ride):
+    """Тренировка завершена: лента, челленджи, дуэли и битвы клубов. Ошибки здесь итог не ломают."""
+    try:
+        await post_to_feeds(bot, ride)
+        for chat_id in db.member_groups(ride["user_id"]):
+            challenge = db.active_challenge(chat_id)
+            if challenge:
+                await refresh_challenge(bot, challenge, ride)
+            for war in db.chat_wars(chat_id):
+                await refresh_war(bot, war)
+        for duel in db.user_duels(ride["user_id"]):
+            await edit_text(bot, duel["chat_id"], duel["message_id"], await duel_text(bot, duel, db.group_lang(duel["chat_id"])))
+    except Exception:
+        logging.exception("Групповые активности после тренировки %s", ride["id"])
+
+
+# --- inline-режим: @бот в любом чате — карточка последней тренировки, неделя, рекорды, приглашение ---
+# Включается в @BotFather: /setinline. Картинку Telegram забирает по ссылке на наш сервер (JPEG).
+
+_inline_cards = {}  # token → (до какого времени, ride_id, JPEG или None)
+
+
+async def inline_card(request):
+    token = request.match_info["token"]
+    until, ride_id, image = _inline_cards.get(token, (0, None, None))
+    if until < time.time():
+        raise web.HTTPNotFound()
+    if image is None:
+        ride = db.get_ride(ride_id)
+        lang = db.user_lang(ride["user_id"])
+        stats = compute_stats(db.get_points(ride_id), db.get_weight(ride["user_id"]), ride["kind"])
+        image = await asyncio.to_thread(render, "post", ride["kind"], stats, "map", FIELDS, record_labels(ride, lang),
+                                        await card_tiles(stats["track"]), lang=lang, as_jpeg=True)
+        _inline_cards[token] = (until, ride_id, image)
+    return web.Response(body=image, content_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@dp.inline_query()
+async def on_inline(query: InlineQuery):
+    user_id = query.from_user.id
+    lang = lang_of(query.from_user)
+    if not has_consent(user_id):
+        await query.answer([], cache_time=0, is_personal=True, button=InlineQueryResultsButton(
+            text=t(lang, "inline_start", app=APP_NAME), start_parameter="inline"))
+        return
+    bot_link = f"https://t.me/{(await query.bot.me()).username}"
+    open_button = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=t(lang, "btn_card_open"), url=f"{bot_link}?startapp")]])
+    results = []
+    ride = db.last_finished_ride(user_id)
+    if ride and (ride["distance_km"] or 0) > 0:
+        now = time.time()
+        for token in [k for k, (until, *_) in _inline_cards.items() if until < now]:
+            del _inline_cards[token]
+        token = secrets.token_urlsafe(16)
+        _inline_cards[token] = (now + INLINE_CARD_TTL_S, ride["id"], None)
+        url = f"{WEBAPP_URL}/inline/{token}.jpg"
+        stats = stats_of(ride)
+        caption = t(lang, "card_caption", kind=t(lang, f"kind_{ride['kind']}"), km=stats["distance_km"],
+                    moving=fmt_duration(stats["moving_s"]), speed=speed_line(stats, lang), app=APP_NAME)
+        results.append(InlineQueryResultPhoto(
+            id=f"last{ride['id']}", photo_url=url, thumbnail_url=url, photo_width=1080, photo_height=1350,
+            title=t(lang, "inline_last"), description=caption.split("\n")[0], caption=caption,
+            reply_markup=open_button))
+    tz = db.user_tz(user_id) or 0
+    today = local_date(time.time(), tz)
+    monday = today - timedelta(days=today.weekday())
+    week = db.totals_by_kind(user_id, datetime(monday.year, monday.month, monday.day, tzinfo=timezone.utc).timestamp()
+                             + tz * 60)
+    if week:
+        lines = [t(lang, "inline_week_text", app=APP_NAME, n=sum(v["count"] for v in week.values()),
+                   km=clubs.fmt_km(sum(v["distance_km"] for v in week.values())))]
+        lines += [t(lang, "inline_kind_line", kind=t(lang, f"kind_{k}"), km=clubs.fmt_km(v["distance_km"]))
+                  for k, v in week.items()]
+        results.append(InlineQueryResultArticle(
+            id="week", title=t(lang, "inline_week"), description=lines[0],
+            input_message_content=InputTextMessageContent(message_text="\n".join(lines)), reply_markup=open_button))
+    records = []
+    for kind in ACTIVITIES:
+        best = db.best_values(user_id, kind) or {}
+        for key, value in best.items():
+            if value:
+                shown = f"{value} {t(lang, 'card_km')}" if key == "distance_km" else (
+                    f"{value} {t(lang, 'card_kmh')}" if key == "max_speed_kmh" else fmt_duration(value))
+                records.append(t(lang, "inline_record_line", kind=t(lang, f"kind_{kind}"), what=t(lang, f"rec_{key}"),
+                                 value=shown))
+    if records:
+        results.append(InlineQueryResultArticle(
+            id="records", title=t(lang, "inline_records"), description=records[0].lstrip("• "),
+            input_message_content=InputTextMessageContent(
+                message_text="\n".join([t(lang, "inline_records_text", app=APP_NAME), *records])),
+            reply_markup=open_button))
+    invite = f"{bot_link}?start=ref_{db.ref_token(user_id)}"
+    results.append(InlineQueryResultArticle(
+        id="invite", title=t(lang, "inline_invite", app=APP_NAME), description=invite,
+        input_message_content=InputTextMessageContent(message_text=t(lang, "inline_invite_text", app=APP_NAME,
+                                                                     link=invite))))
+    await query.answer(results, cache_time=0, is_personal=True)
+
+
+async def group_timers(bot, now):
+    """Раз в минуту: этапы сборов, конец челленджей, дуэлей и битв клубов, напоминания."""
+    for event, stage in db.events_due(now, EVENT_REMIND_BEFORE_S, EVENT_SUMMARY_AFTER_S):
+        await advance_event(bot, event, stage, now)
+    for challenge in db.challenges_due(now):
+        await close_challenge(bot, challenge)
+    for duel in db.duels_due(now, OPEN_CALL_TTL_S):
+        await finish_duel(bot, duel)
+    for war in db.wars_due(now, OPEN_CALL_TTL_S):
+        await finish_war(bot, war)
+    await nudge_groups(bot, now)
 
 
 @dp.errors()
@@ -900,6 +1681,7 @@ async def api_summary(request):
     """Итоги недели и месяца по типам, серии и личные рекорды."""
     user_id = current_user_id(request)
     tz = read_tz(request)
+    db.set_user_tz(user_id, tz)  # для времени сборов и «ранней пташки»
 
     def start_of(day):  # полночь по времени пользователя, unix time
         return datetime(day.year, day.month, day.day, tzinfo=timezone.utc).timestamp() + tz * 60
@@ -1247,6 +2029,7 @@ def make_web_app(bot):
     app.router.add_post("/api/rides/{ride_id:\\d+}/kind", api_ride_kind)
     app.router.add_post("/api/rides/{ride_id:\\d+}/card", api_card)
     app.router.add_get("/card/{token:[\\w-]+}.png", card_file)
+    app.router.add_get("/inline/{token:[\\w-]+}.jpg", inline_card)
     app.router.add_post("/api/consent", api_consent)
     app.router.add_get("/api/consent", api_consent_info)
     app.router.add_get("/api/admin", api_admin)
@@ -1268,6 +2051,7 @@ async def housekeeping(bot):
                     logging.exception("Не удалось отправить итог поездки %s", ride_id)
             db.backup(BACKUP_DIR)
             await post_weekly_ratings(bot, time.time())
+            await group_timers(bot, time.time())
         except Exception as e:
             logging.exception("Фоновая задача упала")
             await notify_admin(bot, f"⚠️ Фоновая задача: {e!r}")
@@ -1325,6 +2109,11 @@ async def main():
         for lang in LANGS:
             if lang != DEFAULT_LANG:
                 await bot.set_my_commands(commands(lang), language_code=lang)
+        # В группах — свои команды: рейтинг, челленджи, сборы, дуэли, битва клубов.
+        await bot.set_my_commands(group_commands(DEFAULT_LANG), scope=BotCommandScopeAllGroupChats())
+        for lang in LANGS:
+            if lang != DEFAULT_LANG:
+                await bot.set_my_commands(group_commands(lang), scope=BotCommandScopeAllGroupChats(), language_code=lang)
     except TelegramAPIError as e:
         # Меню хранится в Telegram с прошлого запуска. Падать тут нельзя: перезапуск снова
         # упрётся в лимит запросов (Flood control), и бот не поднимется вовсе.

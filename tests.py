@@ -311,6 +311,7 @@ class StorageTest(unittest.TestCase):
         self.assertEqual(self.db.export_user(1), {
             "user": {"user_id": 1}, "rides": [], "sessions": [], "rating_groups": [],
             "sos_contacts": [], "sos_contact_for": [], "invited_by": None, "invited": [],
+            "feed_groups": [], "event_answers": [], "events_created": [], "challenges_created": [], "duels": [],
         })
         self.assertEqual(len(self.db.get_points(other)), 10)
 
@@ -522,7 +523,8 @@ class StorageTest(unittest.TestCase):
 def fake_bot():
     """Поддельный Bot: запоминает вызовы, отвечает как Telegram."""
     return SimpleNamespace(
-        send_message=AsyncMock(),
+        send_message=AsyncMock(return_value=SimpleNamespace(message_id=700)),
+        edit_message_text=AsyncMock(),
         send_location=AsyncMock(),
         send_photo=AsyncMock(return_value=SimpleNamespace(photo=[SimpleNamespace(file_id="small"), SimpleNamespace(file_id="big")])),
         save_prepared_inline_message=AsyncMock(return_value=SimpleNamespace(id="prep1")),
@@ -796,6 +798,319 @@ class MapMatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(bot.db.get_points(ride_id)[0][2], 21.0001)
 
 
+class ClubsTest(unittest.TestCase):
+    """Разбор команд групп и номинации — без Telegram."""
+
+    def test_parse_challenge(self):
+        import clubs
+        self.assertEqual(clubs.parse_challenge("300 км"), (300.0, None, False, 7))
+        self.assertEqual(clubs.parse_challenge("каждый 20 км бег"), (20.0, "run", True, 7))
+        self.assertEqual(clubs.parse_challenge("100 km 14 days ride"), (100.0, "ride", False, 14))
+        for bad in ("", "abc", "0 км", "20 км 40 дней"):
+            self.assertIsNone(clubs.parse_challenge(bad), bad)
+
+    def test_parse_event(self):
+        import clubs
+        from datetime import datetime, timezone
+        now = datetime(2026, 11, 25, 10, 0, tzinfo=timezone.utc).timestamp()  # среда, 12:00 по UTC+2
+        when = lambda args: (lambda r: r and (f"{clubs.local(r[0], -120):%d.%m %H:%M}", r[1]))(  # noqa: E731
+            clubs.parse_event(args, now, -120))
+        self.assertEqual(when("сб 9:00 Парк Шевченко"), ("28.11 09:00", "Парк Шевченко"))
+        self.assertEqual(when("завтра 7.30 стадион"), ("26.11 07:30", "стадион"))
+        self.assertEqual(when("11:00 парк"), ("26.11 11:00", "парк"))  # сегодня уже прошло — завтра
+        self.assertEqual(when("01.12 9:00 лес"), ("01.12 09:00", "лес"))
+        self.assertEqual(when("01.01 8:00 новый год"), ("01.01 08:00", "новый год"))  # следующий год
+        for bad in ("9:00", "парк", "пн 25:00 парк", "01.06 9:00 далеко"):
+            self.assertIsNone(clubs.parse_event(bad, now, -120), bad)
+        self.assertEqual(clubs.tz_label(-120), "UTC+2")
+        self.assertEqual(clubs.tz_label(210), "UTC−3:30")
+
+    def test_nominations(self):
+        import clubs
+        day = 86400
+        rides = [{"user_id": u, "started_at": ts, "distance_km": km} for u, ts, km in (
+            (1, 0 * day + 5.5 * 3600, 21.1),  # 05:30 UTC
+            (2, 1 * day + 10 * 3600, 5), (2, 2 * day + 10 * 3600, 5), (2, 3 * day + 10 * 3600, 5),
+            (3, 4 * day + 18 * 3600, 12), (3, 5 * day + 18 * 3600, 0.5),  # короче 1 км не считается
+        )]
+        awards = clubs.nominations(rides, {1: 30, 3: 4}, lambda user_id: -120 if user_id == 1 else 0)
+        self.assertEqual(awards, [("nom_longest", 1, "21.1"), ("nom_early", 1, "7:30"),
+                                  ("nom_steady", 2, 3), ("nom_progress", 3, "8")])
+        self.assertEqual(clubs.nominations([], {}, lambda u: 0), [])
+
+    def test_week_image(self):
+        from cards import render_week
+        png = render_week("Клуб 🏃", "17.11–23.11", 42.5, 2, [("Аня 🦊", 30), ("Олег", 12.5)],
+                          [("Самая длинная", "Аня", "21 км")], "ru")
+        self.assertEqual(Image.open(io.BytesIO(png)).size, (1080, 1350))
+
+
+class GroupsTest(unittest.IsolatedAsyncioTestCase):
+    """Активности в группах с поддельным Telegram."""
+    CHAT = -100
+
+    def setUp(self):
+        bot.db = Storage(":memory:")
+        self.addCleanup(bot.db.conn.close)
+        self.tg = fake_bot()
+        self.admins = set()
+
+        async def member(chat_id, user_id):
+            return SimpleNamespace(status="administrator" if user_id in self.admins else "member",
+                                   user=SimpleNamespace(full_name=f"User{user_id}"))
+        self.tg.get_chat_member = AsyncMock(side_effect=member)
+        for user_id in (1, 2, 3):
+            bot.db.set_consent(user_id, bot.POLICY_VERSION)
+            bot.db.remember_tg_lang(user_id, "ru")
+        bot.db.add_group(self.CHAT, "ru")
+
+    def msg(self, user_id=1, chat_id=CHAT, reply_to=None, title="Клуб"):
+        return SimpleNamespace(
+            chat=SimpleNamespace(id=chat_id, type="supergroup", title=title), bot=self.tg,
+            from_user=SimpleNamespace(language_code="ru", id=user_id),
+            reply_to_message=reply_to and SimpleNamespace(from_user=SimpleNamespace(id=reply_to, is_bot=False)),
+            answer=AsyncMock(return_value=SimpleNamespace(message_id=500)))
+
+    def press(self, data, user_id=1, chat_id=CHAT, message_id=500):
+        return SimpleNamespace(data=data, bot=self.tg, from_user=SimpleNamespace(language_code="ru", id=user_id),
+                               message=SimpleNamespace(chat=SimpleNamespace(id=chat_id), message_id=message_id),
+                               answer=AsyncMock())
+
+    async def ride(self, user_id, km, kind="run", t0=None):
+        ride_id = finished_ride(bot.db, user_id, kind, t0 or time.time() + 5, km)
+        await bot.after_ride(self.tg, bot.db.get_ride(ride_id))
+        return ride_id
+
+    def posted(self):
+        return [c.args[1] for c in self.tg.send_message.call_args_list]
+
+    def edited(self):
+        return self.tg.edit_message_text.call_args.kwargs["text"]
+
+    async def test_challenge_together(self):
+        for user_id in (1, 2):
+            bot.db.set_group_member(self.CHAT, user_id, True)
+        msg = self.msg()
+        await bot.cmd_challenge(msg, SimpleNamespace(args=""))
+        self.assertIn("Как задать цель", msg.answer.call_args.args[0])
+        await bot.cmd_challenge(msg, SimpleNamespace(args="10 км бег"))
+        self.assertIn("🎯 Челлендж: 10 км вместе · бег до", msg.answer.call_args.args[0])
+        await bot.cmd_challenge(msg, SimpleNamespace(args="5 км"))
+        self.assertIn("уже идёт челлендж", msg.answer.call_args.args[0])
+
+        await self.ride(1, 6)
+        self.assertIn("6 из 10 км", self.edited())
+        await self.ride(3, 50)  # не участник рейтинга — не считается
+        self.assertIn("6 из 10 км", self.edited())
+        await self.ride(2, 5, "ride")  # другой тип
+        self.assertNotIn("Цель достигнута", "".join(self.posted()))
+        await self.ride(2, 5)
+        await self.ride(1, 1)
+        self.assertEqual(sum("Цель достигнута: 10 км" in p for p in self.posted()), 1)  # поздравили один раз
+
+        stop = self.msg(user_id=3)
+        await bot.cmd_challenge(stop, SimpleNamespace(args="stop"))
+        self.assertIn("админы группы или автор", stop.answer.call_args.args[0])
+        challenge = bot.db.active_challenge(self.CHAT)
+        await bot.group_timers(self.tg, challenge["ends_at"] + 1)
+        self.assertIn("Челлендж завершён, цель достигнута: 12 из 10 км", self.posted()[-1])
+        self.assertIsNone(bot.db.active_challenge(self.CHAT))
+
+    async def test_challenge_each(self):
+        for user_id in (1, 2):
+            bot.db.set_group_member(self.CHAT, user_id, True)
+        await bot.cmd_challenge(self.msg(), SimpleNamespace(args="каждый 5 км"))
+        await self.ride(1, 3)
+        await self.ride(1, 3)
+        self.assertIn("User1 выполняет цель челленджа: 5 км", self.posted()[-1])
+        self.assertIn("✅ User1 — 6 из 5 км\n▫️ User2 — 0 из 5 км", self.edited())
+        challenge = bot.db.active_challenge(self.CHAT)
+        await bot.group_timers(self.tg, challenge["ends_at"] + 1)
+        self.assertIn("цель выполнили 1 из 2", self.posted()[-1])
+
+    async def test_feed(self):
+        await bot.on_feed(self.press("feed:on", user_id=1))
+        self.assertTrue(bot.db.is_group_member(self.CHAT, 1))  # публикация включает и рейтинг
+        bot.db.set_group_member(self.CHAT, 2, True)  # в рейтинге, но не публикует
+        await self.ride(2, 5)
+        self.tg.send_photo.assert_not_called()
+        await self.ride(1, 0.1)  # случайный старт трансляции
+        self.tg.send_photo.assert_not_called()
+        await self.ride(1, 5)
+        photo = self.tg.send_photo.call_args
+        self.assertEqual(photo.args[0], self.CHAT)
+        self.assertIn("User1: бег, 5 км за 30:00", photo.kwargs["caption"])
+        await bot.on_feed(self.press("feed:off", user_id=1))
+        await self.ride(1, 5)
+        self.assertEqual(self.tg.send_photo.call_count, 1)
+
+        nobody = self.press("feed:on", user_id=9)  # не запускал бота
+        await bot.on_feed(nobody)
+        self.assertIn("прими условия", nobody.answer.call_args.args[0])
+
+    async def test_event(self):
+        bot.db.set_user_tz(1, -120)
+        msg = self.msg()
+        await bot.cmd_run(msg, SimpleNamespace(args="9:00"))
+        self.assertIn("Как позвать на тренировку", msg.answer.call_args.args[0])
+        await bot.cmd_run(msg, SimpleNamespace(args="завтра 9:00 парк Шевченко"))
+        text = msg.answer.call_args.args[0]
+        self.assertIn("📍 Сбор: парк Шевченко", text)
+        self.assertIn("(UTC+2)", text)
+        self.assertIn("Идут (1): User1", text)  # кто зовёт — тот идёт
+        event = bot.db.get_event(1)
+
+        await bot.on_event(self.press(f"ev:{event['id']}:go", user_id=2))
+        self.assertIn("Идут (2): User1, User2", self.edited())
+        stranger = self.press(f"ev:{event['id']}:maybe", user_id=9)
+        await bot.on_event(stranger)
+        self.assertIn("прими условия", stranger.answer.call_args.args[0])
+        cancel = self.press(f"ev:{event['id']}:cancel", user_id=2)
+        await bot.on_event(cancel)
+        self.assertIn("админы группы или автор", cancel.answer.call_args.args[0])
+
+        start = event["starts_at"]
+        await bot.group_timers(self.tg, start - 3000)
+        self.assertIn("⏰ Через час: парк Шевченко, в 09:00. Идут: User1, User2.", self.posted()[-1])
+        await bot.group_timers(self.tg, start + 1)
+        button = self.tg.send_message.call_args.kwargs["reply_markup"].inline_keyboard[0][0]
+        self.assertTrue(button.url.startswith("https://t.me/beout_bot?startapp=session_"))
+        session = bot.db.get_session(bot.db.get_event(event["id"])["session_id"])
+        bot.db.join_session(session["token"], 2, start + 60)
+        ride_id = bot.db.start_ride(2, 2, 9, start + 120, kind="run")
+        for ts, lat, lon in track((3, 10)):
+            bot.db.add_point(ride_id, start + 120 + ts, lat, lon)
+        bot.db.finish_ride(ride_id)
+        await bot.group_timers(self.tg, start + 3 * 3600 + 1)
+        self.assertIn("Итоги сбора «парк Шевченко»: 1 чел., вместе 3 км\nUser2 — 3 км", self.posted()[-1])
+        sent = self.tg.send_message.call_count
+        await bot.group_timers(self.tg, start + 4 * 3600)
+        self.assertEqual(self.tg.send_message.call_count, sent)  # каждый этап — один раз
+
+    async def test_event_cancel(self):
+        await bot.cmd_run(self.msg(), SimpleNamespace(args="завтра 9:00 стадион"))
+        await bot.on_event(self.press("ev:1:cancel", user_id=1))
+        self.assertIn("❌ Сбор отменён.", self.edited())
+        late = self.press("ev:1:go", user_id=2)
+        await bot.on_event(late)
+        self.assertIn("уже прошёл или отменён", late.answer.call_args.args[0])
+        await bot.group_timers(self.tg, bot.db.get_event(1)["starts_at"] + 1)
+        self.tg.send_message.assert_not_called()
+
+    async def test_duel(self):
+        msg = self.msg(reply_to=2)
+        await bot.cmd_duel(msg, SimpleNamespace(args="бег 3"))
+        self.assertIn("User1 вызывает User2 на дуэль: кто больше км за 3 дн. · бег", msg.answer.call_args.args[0])
+        wrong = self.press("duel:1:accept", user_id=3)
+        await bot.on_duel(wrong)
+        self.assertIn("не тебе", wrong.answer.call_args.args[0])
+        await bot.on_duel(self.press("duel:1:accept", user_id=2))
+        self.assertIn("User1 — 0 км\nUser2 — 0 км", self.edited())
+        await self.ride(1, 4)
+        await self.ride(2, 6)
+        await self.ride(2, 9, "ride")  # другой тип — не считается
+        self.assertIn("User1 — 4 км\nUser2 — 6 км", self.edited())
+        await bot.group_timers(self.tg, bot.db.get_duel(1)["ends_at"] + 1)
+        self.assertIn("побеждает User2 — 6 км против 4", self.posted()[-1])
+
+        await bot.cmd_duel(self.msg(), SimpleNamespace(args=""))  # открытый вызов
+        mine = self.press("duel:2:accept", user_id=1)
+        await bot.on_duel(mine)
+        self.assertIn("свой же вызов", mine.answer.call_args.args[0])
+        await bot.group_timers(self.tg, time.time() + 2 * 86400)
+        self.assertIn("Вызов никто не принял.", self.edited())
+
+    async def test_club_war(self):
+        msg = self.msg()
+        await bot.cmd_clubwar(msg, SimpleNamespace(args=""))
+        self.assertIn("админы группы", msg.answer.call_args.args[0])
+        self.admins = {1, 2}
+        await bot.cmd_clubwar(msg, SimpleNamespace(args="5"))
+        self.assertIn("на 5 дн.", msg.answer.call_args.args[0])
+        code = re.search(r"/clubwar (\w+)", msg.answer.call_args.args[0])[1]
+        same = self.msg()
+        await bot.cmd_clubwar(same, SimpleNamespace(args=code))
+        self.assertIn("код вашей же группы", same.answer.call_args.args[0])
+        other = self.msg(user_id=2, chat_id=-200, title="Соседи")
+        await bot.cmd_clubwar(other, SimpleNamespace(args="NOPE42"))
+        self.assertIn("не найден", other.answer.call_args.args[0])
+        await bot.cmd_clubwar(other, SimpleNamespace(args=code))
+        self.assertEqual([c.args[0] for c in self.tg.send_message.call_args_list], [self.CHAT, -200])
+        bot.db.set_group_member(self.CHAT, 1, True)
+        bot.db.set_group_member(-200, 2, True)
+        await self.ride(1, 7)
+        await self.ride(2, 3)
+        self.assertIn("Соседи — 3 км\nКлуб — 7 км", self.edited())  # у каждой группы своя — первой
+        await bot.group_timers(self.tg, bot.db.get_war(1)["ends_at"] + 1)
+        self.assertIn("побеждает «Клуб» — 7 км против 3", self.posted()[-1])
+
+    async def test_top_tabs_and_week_summary(self):
+        now = time.time()
+        week = bot.week_start(now)
+        for user_id in (1, 2):
+            bot.db.set_group_member(self.CHAT, user_id, True)
+        for days_ago in (0, 1, 2):
+            finished_ride(bot.db, 1, "run", now - days_ago * 86400 - 3600, 5)
+        await bot.on_top_tab(self.press("top:streak"))
+        self.assertIn("1. User1 — 3 дн.", self.edited())
+        await bot.on_top_tab(self.press("top:month"))
+        self.assertIn("🏆 Рейтинг месяца", self.edited())
+        self.assertIn("• Месяц", str(self.tg.edit_message_text.call_args.kwargs["reply_markup"]))
+
+        for user_id, km, day in ((1, 21, 1), (2, 5, 2), (2, 5, 3)):
+            finished_ride(bot.db, user_id, "run", week - 7 * 86400 + day * 86400 + 12 * 3600, km)
+        text, image = await bot.week_summary(self.tg, self.CHAT, week - 7 * 86400, "ru")
+        self.assertIn("🏅 Номинации недели\nСамая длинная тренировка — User1, 21 км", text)
+        self.assertIn("Стабильность — User2, 2 дн.", text)
+        self.assertEqual(Image.open(io.BytesIO(image)).size, (1080, 1350))
+
+    async def test_nudges(self):
+        from datetime import datetime, timezone
+        bot.db.set_group_member(self.CHAT, 1, True)
+        evening = datetime(2026, 11, 25, 18, 0, tzinfo=timezone.utc).timestamp()
+        finished_ride(bot.db, 1, "run", evening - 5 * 86400, 5)
+        await bot.nudge_groups(self.tg, evening - 6 * 3600)  # днём не напоминаем
+        self.tg.send_message.assert_not_called()
+        await bot.nudge_groups(self.tg, evening)
+        self.assertIn("не тренировалась уже 5 дн.", self.posted()[-1])
+        await bot.nudge_groups(self.tg, evening + 600)
+        self.assertEqual(self.tg.send_message.call_count, 1)
+
+        for days_ago in (1, 2, 3):
+            finished_ride(bot.db, 1, "run", evening + 86400 - days_ago * 86400 - 3600, 5)
+        await bot.nudge_groups(self.tg, evening + 86400)
+        self.assertIn("Серия клуба — 3 дн. подряд", self.posted()[-1])
+
+        off = self.msg(user_id=2)
+        await bot.cmd_reminders(off, SimpleNamespace(args="off"))
+        self.assertIn("админы группы", off.answer.call_args.args[0])
+        self.admins = {2}
+        await bot.cmd_reminders(off, SimpleNamespace(args="off"))
+        await bot.nudge_groups(self.tg, evening + 10 * 86400)
+        self.assertEqual(self.tg.send_message.call_count, 2)
+
+    async def test_group_only_and_help(self):
+        private = self.msg()
+        private.chat.type = "private"
+        await bot.cmd_challenge(private, SimpleNamespace(args="10"))
+        self.assertIn("работает в группах", private.answer.call_args.args[0])
+        help_ = self.msg()
+        await bot.cmd_group_help(help_)
+        self.assertIn("/run сб 9:00 парк", help_.answer.call_args.args[0])
+
+    async def test_delete_user_cleans_group_data(self):
+        await bot.cmd_run(self.msg(user_id=1), SimpleNamespace(args="завтра 9:00 парк"))
+        await bot.cmd_duel(self.msg(user_id=2, reply_to=1), SimpleNamespace(args=""))
+        await bot.cmd_challenge(self.msg(user_id=1), SimpleNamespace(args="10"))
+        export = bot.db.export_user(1)
+        self.assertEqual(len(export["events_created"]), 1)
+        self.assertEqual(len(export["duels"]), 1)
+        bot.db.delete_user(1)
+        self.assertIsNone(bot.db.get_event(1))
+        self.assertIsNone(bot.db.get_duel(1))
+        self.assertIsNone(bot.db.active_challenge(self.CHAT))
+
+
 class ApiTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         bot.db = Storage(":memory:")
@@ -925,6 +1240,31 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call("GET", path)).status, 404)
         counters = bot.db.admin_stats(time.time(), 1)["counters_30d"]
         self.assertEqual(counters, {"card_story_bot": 1, "card_photo": 1, "card_story_download": 1})
+
+    async def test_inline_mode(self):
+        def query(user_id):
+            return SimpleNamespace(from_user=SimpleNamespace(id=user_id, language_code="ru"), bot=self.tg,
+                                   answer=AsyncMock())
+        q = query(1)
+        await bot.on_inline(q)  # не принимал условия — кнопка «Открыть Be. Out!»
+        self.assertEqual(q.answer.call_args.args[0], [])
+        self.assertEqual(q.answer.call_args.kwargs["button"].start_parameter, "inline")
+
+        self.consent(1)
+        bot.db.remember_tg_lang(1, "ru")
+        finished_ride(bot.db, 1, "run", time.time() - 3600, 5)
+        q = query(1)
+        await bot.on_inline(q)
+        results = {r.id.rstrip("0123456789"): r for r in q.answer.call_args.args[0]}
+        self.assertEqual(set(results), {"last", "week", "records", "invite"})
+        self.assertTrue(q.answer.call_args.kwargs["is_personal"])
+        self.assertIn("Моя неделя в Be. Out!: 1 трен., 5 км", results["week"].input_message_content.message_text)
+        self.assertIn("?start=ref_", results["invite"].input_message_content.message_text)
+        path = results["last"].photo_url.removeprefix("https://example.test")
+        response = await self.call("GET", path)  # Telegram забирает картинку без подписи
+        self.assertEqual(response.content_type, "image/jpeg")
+        self.assertEqual(Image.open(io.BytesIO(await response.read())).size, (1080, 1350))
+        self.assertEqual((await self.call("GET", "/inline/nope.jpg")).status, 404)
 
     async def test_consent_in_mini_app(self):
         response = await self.call("GET", "/api/rides", 1)
@@ -1308,7 +1648,8 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((await bot.private.edited_message.check_root_filters(self.group_message()))[0])
 
     def group_message(self, chat_type="supergroup"):
-        return SimpleNamespace(chat=SimpleNamespace(id=-100, type=chat_type), bot=self.tg, answer=AsyncMock(),
+        return SimpleNamespace(chat=SimpleNamespace(id=-100, type=chat_type, title="Клуб"), bot=self.tg,
+                               answer=AsyncMock(return_value=SimpleNamespace(message_id=500)),
                                from_user=SimpleNamespace(language_code="ru", id=1))
 
     async def test_group_rating(self):

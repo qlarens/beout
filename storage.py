@@ -64,6 +64,62 @@ CREATE TABLE IF NOT EXISTS counters (  -- обезличенные счётчи�
     n    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (day, name)
 );
+CREATE TABLE IF NOT EXISTS challenges (  -- цель группы на N дней: общая или каждому
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id    INTEGER NOT NULL,
+    creator_id INTEGER NOT NULL,
+    goal_km    REAL NOT NULL,
+    kind       TEXT,              -- NULL — все типы
+    each       INTEGER NOT NULL DEFAULT 0,
+    starts_at  REAL NOT NULL,
+    ends_at    REAL NOT NULL,
+    message_id INTEGER,
+    reached_at REAL,
+    closed     INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS events (  -- сбор на тренировку
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id    INTEGER NOT NULL,
+    creator_id INTEGER NOT NULL,
+    starts_at  REAL NOT NULL,
+    tz         INTEGER NOT NULL,  -- как Date.getTimezoneOffset() у создателя: для показа времени
+    place      TEXT NOT NULL,
+    message_id INTEGER,
+    session_id INTEGER,
+    stage      INTEGER NOT NULL DEFAULT 0  -- 0 объявлен, 1 напомнили, 2 начался, 3 итоги, -1 отменён
+);
+CREATE TABLE IF NOT EXISTS event_rsvp (
+    event_id INTEGER NOT NULL,
+    user_id  INTEGER NOT NULL,
+    answer   TEXT NOT NULL,       -- go | maybe | no
+    PRIMARY KEY (event_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS duels (  -- кто больше км за N дней
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id    INTEGER NOT NULL,
+    a_id       INTEGER NOT NULL,
+    b_id       INTEGER,           -- NULL — открытый вызов, принимает любой
+    kind       TEXT,
+    days       INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    starts_at  REAL,
+    ends_at    REAL,
+    message_id INTEGER,
+    status     TEXT NOT NULL DEFAULT 'open'  -- open | active | done | declined
+);
+CREATE TABLE IF NOT EXISTS club_wars (  -- группа против группы: сумма км участников рейтинга
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    code       TEXT NOT NULL UNIQUE,
+    a_chat     INTEGER NOT NULL,
+    b_chat     INTEGER,
+    days       INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    starts_at  REAL,
+    ends_at    REAL,
+    a_msg      INTEGER,
+    b_msg      INTEGER,
+    status     TEXT NOT NULL DEFAULT 'open'  -- open | active | done
+);
 CREATE TABLE IF NOT EXISTS group_members (  -- согласились участвовать в рейтинге группы
     chat_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
@@ -92,8 +148,16 @@ NEW_COLUMNS = {
         "joined_at REAL",  # первое согласие — для статистики роста
         "last_seen REAL",  # последний заход в Mini App (с точностью до 10 минут)
         "policy_notified INTEGER NOT NULL DEFAULT 0",  # о какой версии условий бот уже написал
+        "tz INTEGER",  # часовой пояс телефона (Date.getTimezoneOffset()) — для времени сборов и номинаций
     ),
-    "groups": ("lang TEXT",),  # язык того, кто вызвал /top, — для автопоста рейтинга
+    "groups": (
+        "lang TEXT",  # язык того, кто вызвал /top, — для автопоста рейтинга
+        "title TEXT",  # название группы — для битвы клубов
+        "tz INTEGER",  # часовой пояс того, кто последним настраивал группу, — для напоминаний
+        "reminders INTEGER NOT NULL DEFAULT 1",  # напоминать группе, если давно не тренировались
+        "nudged_at REAL",
+    ),
+    "group_members": ("feed INTEGER NOT NULL DEFAULT 0",),  # публиковать мои тренировки в этой группе
     "sos_contacts": ("lang TEXT",),  # язык контакта, когда он согласился: SOS придёт на нём
     "points": ("snap_lat REAL", "snap_lon REAL"),  # точка, привязанная к дороге (только велотренировки)
     "rides": (
@@ -251,6 +315,13 @@ class Storage:
                 "DELETE FROM sos_contacts WHERE user_id = ? OR contact_id = ?", (user_id, user_id)
             )
             self.conn.execute("DELETE FROM referrals WHERE user_id = ? OR inviter_id = ?", (user_id, user_id))
+            self.conn.execute("DELETE FROM event_rsvp WHERE user_id = ?", (user_id,))
+            self.conn.execute(
+                "DELETE FROM event_rsvp WHERE event_id IN (SELECT id FROM events WHERE creator_id = ?)", (user_id,)
+            )
+            self.conn.execute("DELETE FROM events WHERE creator_id = ?", (user_id,))
+            self.conn.execute("DELETE FROM challenges WHERE creator_id = ?", (user_id,))
+            self.conn.execute("DELETE FROM duels WHERE a_id = ? OR b_id = ?", (user_id, user_id))
 
     def export_user(self, user_id):
         """Все данные пользователя одним словарём — для выгрузки по /export."""
@@ -280,6 +351,17 @@ class Storage:
             )],
             "invited_by": self.inviter(user_id),
             "invited": [dict(r) for r in self.referrals(user_id)],
+            "feed_groups": self.feed_groups(user_id),
+            "event_answers": [dict(r) for r in self.conn.execute(
+                "SELECT event_id, answer FROM event_rsvp WHERE user_id = ?", (user_id,))],
+            "events_created": [dict(r) for r in self.conn.execute(
+                "SELECT id, chat_id, starts_at, place FROM events WHERE creator_id = ?", (user_id,))],
+            "challenges_created": [dict(r) for r in self.conn.execute(
+                "SELECT id, chat_id, goal_km, kind, starts_at, ends_at FROM challenges WHERE creator_id = ?",
+                (user_id,))],
+            "duels": [dict(r) for r in self.conn.execute(
+                "SELECT id, chat_id, a_id, b_id, kind, starts_at, ends_at, status FROM duels "
+                "WHERE a_id = ? OR b_id = ?", (user_id, user_id))],
         }
 
     # --- реферальные ссылки ---
@@ -567,6 +649,16 @@ class Storage:
         with self.conn:
             self.conn.execute("DELETE FROM group_members WHERE chat_id = ?", (chat_id,))
             self.conn.execute("DELETE FROM groups WHERE chat_id = ?", (chat_id,))
+            self.conn.execute("DELETE FROM challenges WHERE chat_id = ?", (chat_id,))
+            self.conn.execute(
+                "DELETE FROM event_rsvp WHERE event_id IN (SELECT id FROM events WHERE chat_id = ?)", (chat_id,)
+            )
+            self.conn.execute("DELETE FROM events WHERE chat_id = ?", (chat_id,))
+            self.conn.execute("DELETE FROM duels WHERE chat_id = ?", (chat_id,))
+            self.conn.execute(
+                "UPDATE club_wars SET status = 'done' WHERE status != 'done' AND (a_chat = ? OR b_chat = ?)",
+                (chat_id, chat_id),
+            )
 
     def set_group_member(self, chat_id, user_id, member):
         self.add_group(chat_id)
@@ -601,6 +693,221 @@ class Storage:
     def mark_posted(self, chat_id, week):
         with self.conn:
             self.conn.execute("UPDATE groups SET posted_week = ? WHERE chat_id = ?", (week, chat_id))
+
+    # --- группы: настройки, участники, лента ---
+    def group(self, chat_id):
+        return self.conn.execute("SELECT * FROM groups WHERE chat_id = ?", (chat_id,)).fetchone()
+
+    def set_group(self, chat_id, **fields):
+        """title, tz, reminders, nudged_at — имена колонок только из кода."""
+        self.add_group(chat_id)
+        with self.conn:
+            for column, value in fields.items():
+                self.conn.execute(f"UPDATE groups SET {column} = ? WHERE chat_id = ?", (value, chat_id))
+
+    def set_user_tz(self, user_id, tz):
+        with self.conn:
+            self.conn.execute("UPDATE users SET tz = ? WHERE user_id = ? AND tz IS NOT ?", (tz, user_id, tz))
+
+    def user_tz(self, user_id):
+        """Часовой пояс пользователя или None, если он ещё не открывал Mini App."""
+        row = self.conn.execute("SELECT tz FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return row and row["tz"]
+
+    def is_group_member(self, chat_id, user_id):
+        return self.conn.execute(
+            "SELECT 1 FROM group_members WHERE chat_id = ? AND user_id = ?", (chat_id, user_id)
+        ).fetchone() is not None
+
+    def group_members(self, chat_id):
+        return [r[0] for r in self.conn.execute("SELECT user_id FROM group_members WHERE chat_id = ?", (chat_id,))]
+
+    def member_groups(self, user_id):
+        return [r[0] for r in self.conn.execute("SELECT chat_id FROM group_members WHERE user_id = ?", (user_id,))]
+
+    def set_feed(self, chat_id, user_id, on):
+        """Публиковать тренировки в группе. Включение заодно включает участие в рейтинге."""
+        if on:
+            self.set_group_member(chat_id, user_id, True)
+        with self.conn:
+            self.conn.execute(
+                "UPDATE group_members SET feed = ? WHERE chat_id = ? AND user_id = ?", (int(on), chat_id, user_id)
+            )
+
+    def feed_groups(self, user_id):
+        return [r[0] for r in self.conn.execute(
+            "SELECT chat_id FROM group_members WHERE user_id = ? AND feed = 1", (user_id,))]
+
+    def group_km(self, chat_id, since, until, kind=None):
+        """{user_id: км} участников рейтинга за [since, until), по завершённым тренировкам."""
+        return {r[0]: r[1] for r in self.conn.execute(
+            "SELECT r.user_id, ROUND(SUM(r.distance_km), 2) FROM rides r "
+            "JOIN group_members g ON g.user_id = r.user_id AND g.chat_id = ? "
+            "WHERE r.ended_at IS NOT NULL AND r.started_at >= ? AND r.started_at < ? AND (? IS NULL OR r.kind = ?) "
+            "GROUP BY r.user_id",
+            (chat_id, since, until, kind, kind),
+        )}
+
+    def group_rides(self, chat_id, since, until):
+        """Завершённые тренировки участников рейтинга за [since, until) — для номинаций и серий."""
+        return self.conn.execute(
+            "SELECT r.* FROM rides r JOIN group_members g ON g.user_id = r.user_id AND g.chat_id = ? "
+            "WHERE r.ended_at IS NOT NULL AND r.started_at >= ? AND r.started_at < ? ORDER BY r.started_at",
+            (chat_id, since, until),
+        ).fetchall()
+
+    def user_km(self, user_id, since, until, kind=None):
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(distance_km), 0) FROM rides WHERE user_id = ? AND ended_at IS NOT NULL "
+            "AND started_at >= ? AND started_at < ? AND (? IS NULL OR kind = ?)",
+            (user_id, since, until, kind, kind),
+        ).fetchone()
+        return round(row[0], 2)
+
+    def groups_for_nudge(self):
+        return self.conn.execute(
+            "SELECT * FROM groups WHERE reminders = 1 AND chat_id IN (SELECT chat_id FROM group_members)"
+        ).fetchall()
+
+    # --- челленджи ---
+    def create_challenge(self, chat_id, creator_id, goal_km, kind, each, days, now=None):
+        now = now or time.time()
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO challenges(chat_id, creator_id, goal_km, kind, each, starts_at, ends_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (chat_id, creator_id, goal_km, kind, int(each), now, now + days * 86400),
+            )
+        return self.get_challenge(cur.lastrowid)
+
+    def get_challenge(self, challenge_id):
+        return self.conn.execute("SELECT * FROM challenges WHERE id = ?", (challenge_id,)).fetchone()
+
+    def active_challenge(self, chat_id):
+        return self.conn.execute(
+            "SELECT * FROM challenges WHERE chat_id = ? AND closed = 0 ORDER BY id DESC LIMIT 1", (chat_id,)
+        ).fetchone()
+
+    def update_challenge(self, challenge_id, **fields):
+        """message_id, reached_at, closed."""
+        with self.conn:
+            for column, value in fields.items():
+                self.conn.execute(f"UPDATE challenges SET {column} = ? WHERE id = ?", (value, challenge_id))
+
+    def challenges_due(self, now):
+        return self.conn.execute("SELECT * FROM challenges WHERE closed = 0 AND ends_at <= ?", (now,)).fetchall()
+
+    # --- сборы ---
+    def create_event(self, chat_id, creator_id, starts_at, tz, place):
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO events(chat_id, creator_id, starts_at, tz, place) VALUES (?, ?, ?, ?, ?)",
+                (chat_id, creator_id, starts_at, tz, place),
+            )
+        return self.get_event(cur.lastrowid)
+
+    def get_event(self, event_id):
+        return self.conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
+
+    def update_event(self, event_id, **fields):
+        """message_id, session_id, stage."""
+        with self.conn:
+            for column, value in fields.items():
+                self.conn.execute(f"UPDATE events SET {column} = ? WHERE id = ?", (value, event_id))
+
+    def set_rsvp(self, event_id, user_id, answer):
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO event_rsvp(event_id, user_id, answer) VALUES (?, ?, ?) "
+                "ON CONFLICT(event_id, user_id) DO UPDATE SET answer = excluded.answer",
+                (event_id, user_id, answer),
+            )
+
+    def rsvps(self, event_id):
+        """{answer: [user_id]} в порядке ответов."""
+        out = {}
+        for user_id, answer in self.conn.execute(
+            "SELECT user_id, answer FROM event_rsvp WHERE event_id = ? ORDER BY rowid", (event_id,)
+        ):
+            out.setdefault(answer, []).append(user_id)
+        return out
+
+    def events_due(self, now, remind_before, summary_after):
+        """[(событие, следующий этап)]: напомнить, начать, подвести итоги."""
+        return [(e, stage) for e, stage in (
+            [(e, 1) for e in self.conn.execute(
+                "SELECT * FROM events WHERE stage = 0 AND starts_at - ? <= ? AND starts_at > ?",
+                (remind_before, now, now))]
+            + [(e, 2) for e in self.conn.execute(
+                "SELECT * FROM events WHERE stage IN (0, 1) AND starts_at <= ?", (now,))]
+            + [(e, 3) for e in self.conn.execute(
+                "SELECT * FROM events WHERE stage = 2 AND starts_at + ? <= ?", (summary_after, now))]
+        )]
+
+    # --- дуэли ---
+    def create_duel(self, chat_id, a_id, b_id, kind, days, now=None):
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO duels(chat_id, a_id, b_id, kind, days, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (chat_id, a_id, b_id, kind, days, now or time.time()),
+            )
+        return self.get_duel(cur.lastrowid)
+
+    def get_duel(self, duel_id):
+        return self.conn.execute("SELECT * FROM duels WHERE id = ?", (duel_id,)).fetchone()
+
+    def update_duel(self, duel_id, **fields):
+        """b_id, starts_at, ends_at, message_id, status."""
+        with self.conn:
+            for column, value in fields.items():
+                self.conn.execute(f"UPDATE duels SET {column} = ? WHERE id = ?", (value, duel_id))
+
+    def user_duels(self, user_id):
+        return self.conn.execute(
+            "SELECT * FROM duels WHERE status = 'active' AND (a_id = ? OR b_id = ?)", (user_id, user_id)
+        ).fetchall()
+
+    def duels_due(self, now, open_ttl):
+        """Идущие дуэли, которым пора подвести итог, и непринятые вызовы старше open_ttl."""
+        return self.conn.execute(
+            "SELECT * FROM duels WHERE (status = 'active' AND ends_at <= ?) OR (status = 'open' AND created_at <= ?)",
+            (now, now - open_ttl),
+        ).fetchall()
+
+    # --- битва клубов ---
+    def create_war(self, chat_id, days, now=None):
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO club_wars(code, a_chat, days, created_at) VALUES (?, ?, ?, ?)",
+                ("".join(secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ") for _ in range(6)), chat_id, days,
+                 now or time.time()),  # только буквы: число в /clubwar — это дни
+            )
+        return self.get_war(cur.lastrowid)
+
+    def get_war(self, war_id):
+        return self.conn.execute("SELECT * FROM club_wars WHERE id = ?", (war_id,)).fetchone()
+
+    def war_by_code(self, code):
+        return self.conn.execute(
+            "SELECT * FROM club_wars WHERE code = ? AND status = 'open'", ((code or "").upper(),)
+        ).fetchone()
+
+    def update_war(self, war_id, **fields):
+        """b_chat, starts_at, ends_at, a_msg, b_msg, status."""
+        with self.conn:
+            for column, value in fields.items():
+                self.conn.execute(f"UPDATE club_wars SET {column} = ? WHERE id = ?", (value, war_id))
+
+    def chat_wars(self, chat_id):
+        return self.conn.execute(
+            "SELECT * FROM club_wars WHERE status = 'active' AND (a_chat = ? OR b_chat = ?)", (chat_id, chat_id)
+        ).fetchall()
+
+    def wars_due(self, now, open_ttl):
+        return self.conn.execute(
+            "SELECT * FROM club_wars WHERE (status = 'active' AND ends_at <= ?) OR (status = 'open' AND created_at <= ?)",
+            (now, now - open_ttl),
+        ).fetchall()
 
     def find_ride_by_message(self, chat_id, message_id):
         return self.conn.execute(
@@ -684,6 +991,12 @@ class Storage:
             (user_id, since),
         ).fetchall()
         return {r["kind"]: {k: r[k] for k in ("count", "distance_km", "moving_s")} for r in rows}
+
+    def last_finished_ride(self, user_id):
+        return self.conn.execute(
+            "SELECT * FROM rides WHERE user_id = ? AND ended_at IS NOT NULL ORDER BY started_at DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
 
     def finished_starts(self, user_id):
         """Время начала всех завершённых тренировок — для серий."""

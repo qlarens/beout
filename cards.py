@@ -112,6 +112,13 @@ def png(img, height):
     return out.getvalue()
 
 
+def jpeg(img, height, quality=88):
+    """Полноразмерный JPEG: так картинку берёт inline-режим Telegram (photo_url)."""
+    out = io.BytesIO()
+    img.resize((W, height), Image.LANCZOS).save(out, "JPEG", quality=quality)
+    return out.getvalue()
+
+
 def jpeg_preview(img, height):
     """Превью в Mini App: вдвое меньше и JPEG — быстро считается и быстро приходит."""
     out = io.BytesIO()
@@ -270,7 +277,7 @@ def fade_into_card(img, top, height):
 
 
 def render(fmt, kind, stats, panel="map", fields=FIELDS, records=(), tiles=None, elevation_m=None, date="",
-           photo=None, lang=DEFAULT_LANG, preview=False):
+           photo=None, lang=DEFAULT_LANG, preview=False, as_jpeg=False):
     """PNG карточки (preview — JPEG вдвое меньше). fmt: post | story; panel: map | route | none;
     fields — что показать из FIELDS; photo — байты картинки для фона; tiles — {(z, x, y): PNG}
     для map_view(track, map_height(...)). PhotoError — фото не открылось."""
@@ -309,7 +316,7 @@ def render(fmt, kind, stats, panel="map", fields=FIELDS, records=(), tiles=None,
         top, _ = where["records"]
         for i, text in enumerate(recs):
             d.text((PAD * S, (top + 36 + i * 50) * S), text, font=font("Inter-Regular.ttf", 34), fill=LIME, anchor="ls")
-    return jpeg_preview(img, height) if preview else png(img, height)
+    return jpeg_preview(img, height) if preview else jpeg(img, height) if as_jpeg else png(img, height)
 
 
 def render_card(kind, stats, records=(), tiles=None, lang=DEFAULT_LANG):
@@ -320,3 +327,51 @@ def render_card(kind, stats, records=(), tiles=None, lang=DEFAULT_LANG):
 def render_story(kind, stats, records=(), tiles=None, elevation_m=None, date="", lang=DEFAULT_LANG):
     """Stories 1080×1920 с настройками по умолчанию."""
     return render("story", kind, stats, records=records, tiles=tiles, elevation_m=elevation_m, date=date, lang=lang)
+
+
+def plain(text):
+    """Без эмодзи и прочих символов вне шрифта Inter: имена из Telegram бывают любыми."""
+    return "".join(ch for ch in text if ord(ch) < 0x2000 or 0x2010 <= ord(ch) <= 0x206F).strip() or "—"
+
+
+def fit_text(d, text, size, width, bold=False):
+    """Обрезает текст многоточием, чтобы влез в width пикселей."""
+    f = font("InterDisplay-Bold.ttf" if bold else "Inter-Regular.ttf", size)
+    if d.textlength(text, font=f) <= width * S:
+        return text
+    while text and d.textlength(text + "…", font=f) > width * S:
+        text = text[:-1]
+    return text + "…"
+
+
+def render_week(title, period, total_km, people, rows, awards, lang=DEFAULT_LANG):
+    """PNG 1080×1350 итогов недели группы. rows — [(имя, км)] по убыванию (до 5);
+    awards — [(название номинации, имя, значение)]."""
+    img = aurora(W, H).resize((W * S, H * S), Image.BICUBIC)
+    header(img, PAD, period, lang)
+    d = ImageDraw.Draw(img)
+    d.text((PAD * S, 260 * S), fit_text(d, plain(title), 64, W - 2 * PAD, True), font=font("InterDisplay-Bold.ttf", 64),
+           fill=WHITE, anchor="ls")
+    value = f"{total_km:.1f}".rstrip("0").rstrip(".")
+    big = font("InterDisplay-Bold.ttf", 150)
+    d.text((PAD * S, 440 * S), value, font=big, fill=WHITE, anchor="ls")
+    d.text((PAD * S + d.textlength(value, font=big) + 24 * S, 440 * S), t(lang, "week_card_total"),
+           font=font("InterDisplay-Bold.ttf", 48), fill=LIME, anchor="ls")
+    d.text((PAD * S, 500 * S), f"{people} {t(lang, 'week_card_people')}", font=font("Inter-Regular.ttf", 34),
+           fill=MUTED, anchor="ls")
+    top = max((km for _, km in rows), default=1) or 1
+    for i, (name, km) in enumerate(rows[:5]):
+        y = 590 + i * 92
+        label = f"{km:.1f}".rstrip("0").rstrip(".") + " " + t(lang, "card_km")
+        d.text((PAD * S, y * S), f"{i + 1}", font=font("InterDisplay-Bold.ttf", 40), fill=LIME, anchor="ls")
+        d.text(((PAD + 56) * S, y * S), fit_text(d, plain(name), 40, 560), font=font("Inter-Regular.ttf", 40),
+               fill=WHITE, anchor="ls")
+        d.text(((W - PAD) * S, y * S), label, font=font("InterDisplay-Bold.ttf", 40), fill=WHITE, anchor="rs")
+        bar = (W - 2 * PAD - 56) * km / top
+        d.rounded_rectangle(((PAD + 56) * S, (y + 18) * S, (PAD + 56 + max(bar, 8)) * S, (y + 30) * S), 6 * S, fill=LIME)
+    for i, (label, name, value) in enumerate(awards[:4]):
+        x, y = PAD + i % 2 * (W - 2 * PAD) / 2, 1080 + i // 2 * 120
+        d.text((x * S, y * S), label, font=font("Inter-Regular.ttf", 30), fill=MUTED, anchor="ls")
+        d.text((x * S, (y + 48) * S), fit_text(d, f"{plain(name)} · {value}", 38, (W - 2 * PAD) / 2 - 24, True),
+               font=font("InterDisplay-Bold.ttf", 38), fill=WHITE, anchor="ls")
+    return png(img, H)
