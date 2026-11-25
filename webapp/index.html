@@ -235,6 +235,9 @@
   <h2 data-t="my_data"></h2>
   <p class="hint"><span data-t="data_hint"></span><br>
     <a href="/privacy" id="privacy-link" data-t="privacy_link"></a></p>
+  <h2 data-t="partner_title"></h2>
+  <p class="hint" data-t="partner_hint"></p>
+  <button class="wide" id="partner"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/></svg><span data-t="partner_button"></span></button>
 </section>
 
 <section id="ride" class="hidden">
@@ -351,6 +354,8 @@ const I18N = {
     sos_title: "Экстренные контакты (SOS)",
     sos_hint: "Контакт сам открывает ссылку и соглашается. Кнопка SOS — на экране идущей тренировки: контакты получат твою последнюю геопозицию. Это не вызов экстренных служб — в опасности звони 112.",
     sos_invite: "Пригласить контакт", my_data: "Мои данные",
+    partner_title: "Сотрудничество", partner_button: "Написать нам",
+    partner_hint: "Реклама, партнёрство, клубы, тренеры и совместные челленджи — пиши, обсудим.",
     ref_title: "Пригласить друзей", ref_invite: "Отправить ссылку другу", no_invited: "Пока никто не пришёл по твоей ссылке.",
     ref_hint: "Друг, который впервые запустит бота по твоей ссылке и примет условия, появится здесь.",
     ref_share_text: "Записываю тренировки в Be. Out! прямо в Telegram — присоединяйся:",
@@ -434,6 +439,8 @@ const I18N = {
     sos_title: "Екстрені контакти (SOS)",
     sos_hint: "Контакт сам відкриває посилання й погоджується. Кнопка SOS — на екрані поточного тренування: контакти отримають твою останню геопозицію. Це не виклик екстрених служб — у небезпеці телефонуй 112.",
     sos_invite: "Запросити контакт", my_data: "Мої дані",
+    partner_title: "Співпраця", partner_button: "Написати нам",
+    partner_hint: "Реклама, партнерство, клуби, тренери та спільні челенджі — пиши, обговоримо.",
     ref_title: "Запросити друзів", ref_invite: "Надіслати посилання другу", no_invited: "Поки ніхто не прийшов за твоїм посиланням.",
     ref_hint: "Друг, який уперше запустить бота за твоїм посиланням і прийме умови, з'явиться тут.",
     ref_share_text: "Записую тренування в Be. Out! просто в Telegram — приєднуйся:",
@@ -517,6 +524,8 @@ const I18N = {
     sos_title: "Emergency contacts (SOS)",
     sos_hint: "A contact opens the link and agrees themselves. The SOS button is on the screen of an ongoing workout: your contacts get your last location. It doesn't call emergency services — if you're in danger, call 112.",
     sos_invite: "Invite a contact", my_data: "My data",
+    partner_title: "Partnerships", partner_button: "Contact us",
+    partner_hint: "Advertising, partnerships, clubs, coaches and joint challenges: get in touch.",
     ref_title: "Invite friends", ref_invite: "Send the link to a friend", no_invited: "Nobody has joined via your link yet.",
     ref_hint: "A friend who starts the bot for the first time via your link and accepts the terms shows up here.",
     ref_share_text: "I track my workouts with Be. Out! right in Telegram. Join me:",
@@ -866,6 +875,13 @@ function langChips() {
 }
 $("save-weight").addEventListener("click", async () => {
   try { await post("/api/weight", { weight: Number($("weight").value) }); haptic("success"); } catch (e) { showError(e); }
+});
+// Сотрудничество: пока Telegram, потом — почта на lilaxy.com (mailto: откроется в почтовом приложении).
+const PARTNER_URL = "https://t.me/clarence_everhart";
+$("partner").addEventListener("click", () => {
+  if (tg && PARTNER_URL.startsWith("https://t.me/")) tg.openTelegramLink(PARTNER_URL);
+  else if (tg && PARTNER_URL.startsWith("https://")) tg.openLink(PARTNER_URL);
+  else window.open(PARTNER_URL);
 });
 $("privacy-link").addEventListener("click", (e) => {
   if (!tg) return;
