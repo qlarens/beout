@@ -114,9 +114,9 @@
   .error { color: var(--danger); margin: 12px 0; }
 
   nav {
-    position: fixed; left: 0; right: 0; bottom: 0; display: flex; flex-wrap: wrap; z-index: 500;
+    position: fixed; left: 0; right: 0; bottom: 0; display: flex; z-index: 500;
     background: var(--bg); border-top: 1px solid var(--card);
-    padding: 2px 8px calc(6px + env(safe-area-inset-bottom));
+    padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
   }
   nav button { flex: 1; flex-direction: column; gap: 2px; background: none; color: var(--hint); font-size: 11px; padding: 4px; }
   nav button[aria-current="page"] { color: var(--ink); }
@@ -127,8 +127,10 @@
   .rec-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--card); }
   .rec-row b { font-family: "Inter Display", "Inter", sans-serif; }
 
-  /* Версия — строкой над вкладками, в неподвижной панели: всегда на одном месте, не зависит от длины экрана. */
-  nav .version { flex: 0 0 100%; text-align: center; color: var(--hint); font-size: 10px; line-height: 12px; opacity: .6; margin: 0; }
+  /* Версия — над полосой панели вкладок: всегда на одном месте, не зависит от длины экрана. */
+  nav .version { position: absolute; left: 0; right: 0; bottom: 100%; margin: 0; padding: 2px 0;
+                 background: var(--bg); text-align: center; font-size: 10px; line-height: 12px; }
+  nav .version::before { content: attr(data-v); color: var(--hint); opacity: .6; }
   .sheet { position: fixed; inset: 0; background: var(--bg); padding: 24px 16px; overflow: auto; z-index: 1000; }
   .sheet-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .sheet-head h1 { margin: 0; }
@@ -737,7 +739,7 @@ async function loadMe() {
   me = await api("/api/rides");
   setLang(me.lang);
   $("admin-tab").classList.toggle("hidden", !me.admin);
-  $("version").textContent = `Be. Out! v${me.version}`;
+  $("version").dataset.v = `Be. Out! v${me.version}`;
   return me;
 }
 
