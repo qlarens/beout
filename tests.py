@@ -31,8 +31,9 @@ bot.fetch_elevations = AsyncMock(return_value=None)
 REAL_FETCH_TILES = bot.fetch_tiles  # и в OSM тоже: см. MapTest
 bot.fetch_tiles = AsyncMock(return_value=None)
 from auth import validate_init_data  # noqa: E402
+import cards  # noqa: E402
 from cards import MAP_H, MAP_MARGIN, MAP_W, TILE, map_view, project, render_card, render_story  # noqa: E402
-from aiohttp import web  # noqa: E402
+from aiohttp import FormData, web  # noqa: E402
 from stats import compute_stats, elevation_gain, streaks  # noqa: E402
 from i18n import TEXTS, pick, t  # noqa: E402
 from settings import MAP_MAX_ZOOM, SESSION_TTL_S  # noqa: E402
@@ -292,6 +293,46 @@ class StorageTest(unittest.TestCase):
         self.assertIsNone(self.db.inviter(3))
         self.assertIsNone(self.db.user_by_ref_token(token))
 
+    def test_consent_dates_and_policy_notice(self):
+        self.db.set_consent(1, 1)
+        joined = self.db.conn.execute("SELECT joined_at FROM users WHERE user_id = 1").fetchone()[0]
+        self.db.set_consent(2, 2)
+        self.db.set_consent(3, 3)
+        self.assertEqual(self.db.users_to_notify(3), [1, 2])
+        self.db.mark_policy_notified(1, 3)
+        self.assertEqual(self.db.users_to_notify(3), [2])  # второй раз не пишем
+        self.db.set_consent(1, 3)
+        self.assertEqual(self.db.conn.execute("SELECT joined_at FROM users WHERE user_id = 1").fetchone()[0], joined)
+        self.db.touch(1, 1000)
+        self.db.touch(1, 1300)  # чаще раза в 10 минут не пишем
+        self.assertEqual(self.db.conn.execute("SELECT last_seen FROM users WHERE user_id = 1").fetchone()[0], 1000)
+
+    def test_admin_stats(self):
+        day, now = 86400, 100 * 86400 + 3600  # 1 ч после полуночи UTC
+        for user_id, joined_days_ago in ((1, 20), (2, 3), (3, 0)):
+            self.db.set_consent(user_id, 2)
+            self.db.conn.execute("UPDATE users SET joined_at = ? WHERE user_id = ?", (now - joined_days_ago * day, user_id))
+        self.db.set_consent(4, 1)  # не принял новые условия
+        self.db.conn.execute("UPDATE users SET joined_at = ? WHERE user_id = 4", (now,))
+        for user_id, days_ago, kind in ((1, 10, "run"), (1, 9, "run"), (1, 1, "ride"), (2, 1, "run"), (2, 0, "run")):
+            finished_ride(self.db, user_id, kind, now - days_ago * day - 600, 2)
+        self.db.add_referral(2, 1)
+        self.db.count("card_post_chat", now)
+        self.db.count("card_post_chat", now)
+        a = self.db.admin_stats(now, 2, tz=-120)  # UTC+2
+        self.assertEqual((a["users"], a["new_7d"], a["new_prev_7d"], a["outdated_consent"]), (4, 3, 0, 1))
+        self.assertEqual((a["active_7d"], a["active_prev_7d"], a["active_30d"]), (2, 1, 2))
+        self.assertEqual((a["rides_7d"], a["km_7d"], a["rides_prev_7d"]), (3, 6.0, 2))
+        self.assertEqual(a["funnel"], [4, 2, 2, 0])
+        self.assertEqual(a["retention"], {"cohort": 1, "came_back": 1, "last_week": 1, "both_weeks": 1})
+        self.assertEqual(a["kinds_30d"], {"run": {"rides": 4, "km": 8.0}, "ride": {"rides": 1, "km": 2.0}})
+        self.assertEqual(a["daily"]["new"][-1], 2)  # сегодня по местному времени: пользователи 3 и 4
+        self.assertEqual(a["daily"]["active"][-2:], [2, 1])
+        self.assertEqual(sum(a["daily"]["rides"]), 5)
+        self.assertEqual(a["counters_30d"], {"card_post_chat": 2})
+        self.assertEqual(a["recent"][0]["user_id"], 3)
+        self.assertEqual([u["inviter_id"] for u in a["recent"] if u["user_id"] == 2], [1])
+
     def test_session_links_rides(self):
         now = 1_000_000.0
         before = self.db.start_ride(1, 1, 1, now - 10)  # уже идёт — привяжется при создании
@@ -388,6 +429,7 @@ class StorageTest(unittest.TestCase):
             old = sqlite3.connect(path)
             old.executescript(SCHEMA)  # схема первой версии
             old.execute("INSERT INTO rides(user_id, chat_id, message_id, started_at, ended_at) VALUES (1, 1, 1, 0, 90)")
+            old.execute("INSERT INTO users(user_id) VALUES (1), (2)")
             old.executemany("INSERT INTO points(ride_id, ts, lat, lon) VALUES (1, ?, ?, ?)", line(10))
             old.commit()
             old.close()
@@ -395,6 +437,8 @@ class StorageTest(unittest.TestCase):
             self.assertAlmostEqual(db.get_ride(1)["distance_km"], 0.5, places=1)
             self.assertEqual(db.get_ride(1)["kind"], "ride")  # раньше были только велопоездки
             self.assertEqual(db.consent_version(1), 0)  # старые пользователи принимают условия заново
+            joined = dict(db.conn.execute("SELECT user_id, joined_at FROM users").fetchall())
+            self.assertEqual(joined, {1: 0, 2: None})  # дата регистрации — первая тренировка
             db.conn.close()
 
     def test_backup_keeps_last_7(self):
@@ -496,6 +540,57 @@ class CardTest(unittest.TestCase):
             self.assertIn("лучший 1 км", labels)
             self.assertEqual(len(labels), 3 + 2 + 6 * 2)  # шапка, дистанция с «км», полная сетка 3×2
             self.assertIn("@beoutbot от lilaxy.com", labels)
+
+    def test_layout_fits(self):
+        """Любой набор настроек: блоки в пределах карточки, не наезжают друг на друга, карта не меньше минимума."""
+        for fmt, (height, _, top, bottom) in cards.FORMATS.items():
+            for panel in cards.PANELS:
+                for photo in (False, True):
+                    for n_cells in range(0, 7 if fmt == "story" else 5):
+                        for hero in (False, True):
+                            for n_records in range(3):
+                                where = cards.layout(fmt, n_cells, hero, n_records, panel, photo)
+                                blocks = sorted(where.values())
+                                with self.subTest(fmt=fmt, panel=panel, photo=photo, cells=n_cells):
+                                    if blocks:
+                                        self.assertGreaterEqual(blocks[0][0], top)
+                                        self.assertLessEqual(blocks[-1][0] + blocks[-1][1], bottom)
+                                    for (y1, h1), (y2, _) in zip(blocks, blocks[1:]):
+                                        self.assertGreaterEqual(y2, y1 + h1 + cards.GAP)
+                                    if panel != "none":
+                                        self.assertGreaterEqual(where["panel"][1], cards.MIN_MAP_H)
+
+    def test_photo_background(self):
+        out = io.BytesIO()
+        Image.new("RGB", (600, 800), (250, 120, 40)).save(out, "JPEG")
+        stats = compute_stats(track((1.2, 10)), 70, "run")
+        for fmt, size in (("post", (1080, 1350)), ("story", (1080, 1920))):
+            img = Image.open(io.BytesIO(cards.render(fmt, "run", stats, "route", photo=out.getvalue()))).convert("RGB")
+            self.assertEqual(img.size, size)
+            self.assertGreater(img.getpixel((540, 300))[0], 150)  # верх — фото, со всеми цифрами и картой
+            self.assertEqual(img.getpixel((5, size[1] - 5)), (14, 17, 22))  # низ — тёмная карточка
+        preview = cards.render("story", "run", stats, "none", preview=True)
+        self.assertEqual(Image.open(io.BytesIO(preview)).format, "JPEG")
+        with self.assertRaises(cards.PhotoError):
+            cards.render("post", "run", stats, photo=b"not an image")
+        with patch.object(cards, "MAX_PHOTO_PIXELS", 100), self.assertRaises(cards.PhotoError):
+            cards.render("post", "run", stats, photo=out.getvalue())
+
+    def test_card_fields(self):
+        stats = compute_stats(track((1.2, 10)), 70, "run")
+        with patch.object(ImageDraw.ImageDraw, "text", autospec=True) as text:
+            cards.render("post", "run", stats, "none", ("distance", "kcal"), ["Рекорд"], date="24.11.2026", lang="ru")
+        labels = [c.args[2] for c in text.call_args_list]
+        self.assertIn("ккал", labels)
+        self.assertNotIn("в движении", labels)
+        self.assertNotIn("Рекорд", labels)
+        self.assertIn("Бег", labels)  # без «date» — без даты в шапке
+        with patch.object(ImageDraw.ImageDraw, "text", autospec=True) as text:
+            cards.render("post", "run", stats, "none", ("date", "records"), ["Рекорд"], date="24.11.2026", lang="ru")
+        labels = [c.args[2] for c in text.call_args_list]
+        self.assertIn("Бег · 24.11.2026", labels)
+        self.assertIn("Рекорд", labels)
+        self.assertNotIn("км", labels)
 
     def test_map_view(self):
         def on_card(route):
@@ -610,18 +705,45 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call("POST", "/api/weight", 1, json={"weight": 70})).status, 200)
         self.assertEqual(bot.db.get_weight(1), 70)
 
-    async def test_share_card(self):
-        self.consent(1, 2)
-        ride_id = bot.db.start_ride(1, 1, 1, 0, kind="run")
-        for ts, lat, lon in track((1.5, 10)):
-            bot.db.add_point(ride_id, ts, lat, lon)
-        bot.db.finish_ride(ride_id)
-        self.assertEqual((await self.call("POST", f"/api/rides/{ride_id}/share", 2)).status, 404)
+    async def card(self, ride_id, user_id=1, photo=None, tz="-60", options=None, **opts):
+        form = FormData()
+        form.add_field("options", options if options is not None else json.dumps(opts))
+        if photo is not None:
+            form.add_field("photo", photo, filename="photo.jpg", content_type="image/jpeg")
+        return await self.call("POST", f"/api/rides/{ride_id}/card?tz={tz}", user_id, data=form)
 
-        response = await self.call("POST", f"/api/rides/{ride_id}/share", 1)
+    async def test_card_preview_and_options(self):
+        self.consent(1, 2)
+        ride_id = finished_ride(bot.db, 1, "run", 12 * 86400 - 1800, 1.5)  # 12.01.1970 23:30 UTC
+        self.assertEqual((await self.card(ride_id, 2)).status, 404)
+        for bad in ({"format": "square"}, {"panel": "globe"}, {"fields": ["mood"]}, {"action": "print"}):
+            self.assertEqual((await self.card(ride_id, **bad)).status, 400, bad)
+        self.assertEqual((await self.card(ride_id, options="{not json")).status, 400)
+        self.assertEqual((await self.card(ride_id, tz="x")).status, 400)
+
+        with patch.object(bot, "render", wraps=bot.render) as render:
+            response = await self.card(ride_id, format="story", panel="route", fields=["distance", "date"])
+        self.assertEqual(response.content_type, "image/jpeg")
+        self.assertEqual(Image.open(io.BytesIO(await response.read())).size, (540, 960))  # превью вдвое меньше
+        self.assertEqual(render.call_args.args[8], "13.01.1970")  # у пользователя UTC+1 — уже 13-е
+        self.tg.send_photo.assert_not_called()  # превью никуда не отправляется
+        self.assertEqual(bot.db.admin_stats(time.time(), 1)["counters_30d"], {})
+
+        out = io.BytesIO()
+        Image.new("RGB", (300, 400), "orange").save(out, "JPEG")
+        self.assertEqual((await self.card(ride_id, photo=out.getvalue())).status, 200)
+        response = await self.card(ride_id, photo=b"definitely not a photo")
+        self.assertEqual(response.status, 400)
+        self.assertEqual(response.headers["X-Error"], "err_photo")
+
+    async def test_card_to_chat(self):
+        self.consent(1)
+        ride_id = finished_ride(bot.db, 1, "run", time.time() - 3600, 1.5)
+        response = await self.card(ride_id, action="chat")
         self.assertEqual(await response.json(), {"prepared_id": "prep1"})
         photo = self.tg.send_photo.call_args
         self.assertEqual(photo.args[0], 1)
+        self.assertEqual(Image.open(io.BytesIO(photo.args[1].data)).size, (1080, 1350))
         self.assertIn("Бег: 1.5 км", photo.kwargs["caption"])
         button = photo.kwargs["reply_markup"].inline_keyboard[0][0]
         self.assertEqual(button.url, "https://t.me/beout_bot?startapp")
@@ -630,23 +752,61 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
 
         # Telegram не принял prepared message — карточка всё равно в чате с ботом.
         self.tg.save_prepared_inline_message.side_effect = bot.TelegramAPIError(method=None, message="nope")
-        response = await self.call("POST", f"/api/rides/{ride_id}/share", 1)
+        response = await self.card(ride_id, action="chat")
         self.assertEqual(await response.json(), {"prepared_id": None})
+        self.assertEqual(bot.db.admin_stats(time.time(), 1)["counters_30d"], {"card_post_chat": 2})
 
-    async def test_story_card(self):
-        self.consent(1, 2)
-        ride_id = finished_ride(bot.db, 1, "run", 12 * 86400 - 1800, 1.5)  # 12.01.1970 23:30 UTC
-        path = f"/api/rides/{ride_id}/story?tz=-60"  # у пользователя UTC+1 — уже 13-е
-        self.assertEqual((await self.call("POST", path, 2)).status, 404)
-        self.assertEqual((await self.call("POST", f"/api/rides/{ride_id}/story?tz=x", 1)).status, 400)
-        self.tg.send_photo.reset_mock()
-        with patch.object(bot, "render_story", wraps=bot.render_story) as render:
-            self.assertEqual((await self.call("POST", path, 1)).status, 200)
-        self.assertEqual(render.call_args.args[-2:], ("13.01.1970", "ru"))
+    async def test_card_to_bot_and_download(self):
+        self.consent(1)
+        ride_id = finished_ride(bot.db, 1, "run", time.time() - 3600, 1.5)
+        out = io.BytesIO()
+        Image.new("RGB", (300, 400), "orange").save(out, "JPEG")
+        self.assertEqual((await self.card(ride_id, format="story", action="bot", photo=out.getvalue())).status, 200)
         photo = self.tg.send_photo.call_args
-        self.assertEqual(photo.args[0], 1)
-        self.assertEqual(Image.open(io.BytesIO(photo.args[1].data)).size, (1080, 1920))
+        self.assertEqual(Image.open(io.BytesIO(photo.args[1].data)).size, (1080, 1920))  # Instagram Stories
         self.assertIn("Instagram", photo.kwargs["caption"])
+
+        data = await (await self.card(ride_id, format="story", action="download")).json()
+        self.assertTrue(data["url"].startswith("https://example.test/card/"))
+        path = data["url"].removeprefix("https://example.test")
+        response = await self.call("GET", path)  # без подписи: ссылку открывает Telegram при скачивании
+        self.assertEqual(response.content_type, "image/png")
+        self.assertEqual(Image.open(io.BytesIO(await response.read())).size, (1080, 1920))
+        self.assertEqual((await self.call("GET", "/card/unknown.png")).status, 404)
+        token = path.split("/")[-1].removesuffix(".png")
+        bot._card_files[token] = (0, b"")  # прошло 10 минут
+        self.assertEqual((await self.call("GET", path)).status, 404)
+        counters = bot.db.admin_stats(time.time(), 1)["counters_30d"]
+        self.assertEqual(counters, {"card_story_bot": 1, "card_photo": 1, "card_story_download": 1})
+
+    async def test_consent_in_mini_app(self):
+        response = await self.call("GET", "/api/rides", 1)
+        self.assertEqual((response.status, response.headers["X-Error"]), (403, "err_consent"))
+        self.assertEqual(await (await self.call("GET", "/api/consent", 1)).json(),
+                         {"updated": False, "version": bot.POLICY_VERSION, "lang": None})
+        self.assertEqual((await self.call("POST", "/api/consent")).status, 401)  # без подписи Telegram — нельзя
+        self.assertTrue((await (await self.call("POST", "/api/consent", 1)).json())["newcomer"])
+        self.assertEqual((await self.call("GET", "/api/rides", 1)).status, 200)
+        bot.db.set_consent(2, bot.POLICY_VERSION - 1)
+        self.assertTrue((await (await self.call("GET", "/api/consent", 2)).json())["updated"])
+        self.assertFalse((await (await self.call("POST", "/api/consent", 2)).json())["newcomer"])
+
+    async def test_admin(self):
+        self.consent(1, 2, 3)
+        bot.db.add_referral(2, 5)
+        bot.db.add_referral(3, 1)
+        bot.db.add_referral(4, 1)
+        self.assertEqual((await self.call("GET", "/api/admin", 1)).status, 404)
+        self.assertFalse((await (await self.call("GET", "/api/rides", 1)).json())["admin"])
+        with patch.object(bot, "ADMIN_CHAT_ID", "9, 1"):
+            self.assertTrue((await (await self.call("GET", "/api/rides", 1)).json())["admin"])
+            response = await self.call("GET", "/api/admin?tz=-60", 1)
+        a = await response.json()
+        self.assertEqual(a["users"], 3)
+        self.assertEqual([(r["name"], r["count"]) for r in a["referrals"]], [("User1", 2), ("User5", 1)])  # больше — выше
+        self.assertEqual([x["name"] for x in a["referrals"][0]["invited"]], ["User4", "User3"])
+        recent = {u["name"]: u["invited_by"] for u in a["recent"]}
+        self.assertEqual(recent, {"User1": None, "User2": "User5", "User3": "User1"})
 
     async def test_history_filter_summary_delete(self):
         self.consent(1, 2)
@@ -923,7 +1083,9 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
 
         friend, command = start(2, f"ref_{token}")
         await bot.cmd_start(friend, command)
-        data = friend.answer.call_args.kwargs["reply_markup"].inline_keyboard[-1][0].callback_data
+        read, accept_button = friend.answer.call_args.kwargs["reply_markup"].inline_keyboard[0]  # в один ряд
+        self.assertIn("/privacy", read.url)
+        data = accept_button.callback_data
         self.assertEqual(data, f"consent:ref_{token}")
         self.assertEqual(bot.db.referrals(1), [])  # до согласия ничего не храним
         self.tg.send_message.reset_mock()
@@ -942,6 +1104,41 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         await bot.on_consent(accept(1, data))  # своя ссылка
         await bot.on_consent(accept(4, "consent:ref_unknown"))
         self.assertEqual(bot.db.referral_totals(), [(1, 1)])
+
+    async def test_policy_update_notice(self):
+        bot.db.set_consent(1, bot.POLICY_VERSION - 1)
+        bot.db.remember_tg_lang(1, "ru")
+        bot.db.set_consent(2, bot.POLICY_VERSION)  # уже принял
+        bot.db.set_consent(3, bot.POLICY_VERSION - 1)  # заблокировал бота
+
+        async def send(chat_id, text, **kwargs):
+            if chat_id == 3:
+                raise bot.TelegramForbiddenError(method=None, message="blocked")
+        self.tg.send_message.side_effect = send
+        with patch.object(bot.asyncio, "sleep", AsyncMock()):
+            await bot.announce_policy(self.tg)
+            self.assertEqual([c.args[0] for c in self.tg.send_message.call_args_list], [1, 3])
+            first = self.tg.send_message.call_args_list[0]
+            self.assertIn("Условия использования обновились", first.args[1])
+            read, accept = first.kwargs["reply_markup"].inline_keyboard[0]
+            self.assertEqual((read.text, accept.callback_data), ("📄 Прочитать", "consent"))
+            await bot.announce_policy(self.tg)  # перезапуск — второй раз не пишем
+            self.assertEqual(self.tg.send_message.call_count, 2)
+
+        self.tg.send_message.reset_mock(side_effect=True)
+        msg = SimpleNamespace(from_user=SimpleNamespace(language_code="ru", id=1), bot=self.tg, answer=AsyncMock())
+        await bot.cmd_start(msg, SimpleNamespace(args=None))
+        self.assertIn("обновились", msg.answer.call_args.args[0])  # не «перед началом — о данных»
+        await bot.on_consent(self.callback("consent"))
+        self.assertTrue(bot.has_consent(1))
+        self.tg.send_message.assert_called_once()  # только «Принято» вместо сообщения, без приветствия заново
+        self.assertIn("Принято", self.tg.send_message.call_args.args[1])
+
+    def test_admin_ids(self):
+        with patch.object(bot, "ADMIN_CHAT_ID", " 8937268686, 12 ;x -100500"):  # группа — тоже можно
+            self.assertEqual(bot.admin_ids(), {8937268686, 12, -100500})
+        with patch.object(bot, "ADMIN_CHAT_ID", None):
+            self.assertEqual(bot.admin_ids(), set())
 
     async def test_invites_only_for_admin(self):
         bot.db.add_referral(2, 1)

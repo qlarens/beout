@@ -58,6 +58,12 @@ CREATE TABLE IF NOT EXISTS referrals (  -- user_id впервые принял �
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS referrals_by_inviter ON referrals(inviter_id, created_at);
+CREATE TABLE IF NOT EXISTS counters (  -- обезличенные счётчики по дням (UTC): без user_id
+    day  TEXT NOT NULL,
+    name TEXT NOT NULL,
+    n    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, name)
+);
 CREATE TABLE IF NOT EXISTS group_members (  -- согласились участвовать в рейтинге группы
     chat_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
@@ -83,6 +89,9 @@ NEW_COLUMNS = {
         "lang TEXT",  # язык, выбранный в профиле; NULL — как в Telegram
         "ref_token TEXT",  # из реферальной ссылки «пригласить друзей»; постоянный
         "tg_lang TEXT",  # язык Telegram (ru/uk/en) — для сообщений без апдейта: итог по таймеру, SOS
+        "joined_at REAL",  # первое согласие — для статистики роста
+        "last_seen REAL",  # последний заход в Mini App (с точностью до 10 минут)
+        "policy_notified INTEGER NOT NULL DEFAULT 0",  # о какой версии условий бот уже написал
     ),
     "groups": ("lang TEXT",),  # язык того, кто вызвал /top, — для автопоста рейтинга
     "sos_contacts": ("lang TEXT",),  # язык контакта, когда он согласился: SOS придёт на нём
@@ -110,6 +119,12 @@ class Storage:
                     if column.split()[0] not in have:
                         self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
                         added.add(column.split()[0])
+            if "joined_at" in added:  # для старых — первая тренировка или согласие, что раньше
+                self.conn.execute(
+                    "UPDATE users SET joined_at = MIN(COALESCE(consent_at, 9e18), COALESCE("
+                    "(SELECT MIN(started_at) FROM rides WHERE rides.user_id = users.user_id), 9e18))"
+                )
+                self.conn.execute("UPDATE users SET joined_at = NULL WHERE joined_at = 9e18")
             # Появилась новая статистика — пересчитать закрытые тренировки.
             if added & set(STAT_KEYS):
                 for (ride_id,) in self.conn.execute(
@@ -177,12 +192,42 @@ class Storage:
         return self.conn.execute("SELECT COUNT(*) FROM users WHERE consent_version > 0").fetchone()[0]
 
     def set_consent(self, user_id, version):
+        now = time.time()
         with self.conn:
             self.conn.execute(
-                "INSERT INTO users(user_id, consent_at, consent_version) VALUES (?, ?, ?) "
-                "ON CONFLICT(user_id) DO UPDATE SET "
-                "consent_at = excluded.consent_at, consent_version = excluded.consent_version",
-                (user_id, time.time(), version),
+                "INSERT INTO users(user_id, consent_at, consent_version, joined_at, policy_notified) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
+                "consent_at = excluded.consent_at, consent_version = excluded.consent_version, "
+                "joined_at = COALESCE(users.joined_at, excluded.joined_at), policy_notified = excluded.policy_notified",
+                (user_id, now, version, now, version),
+            )
+
+    def users_to_notify(self, version):
+        """Принимали старые условия, и о версии version бот им ещё не писал."""
+        return [r[0] for r in self.conn.execute(
+            "SELECT user_id FROM users WHERE consent_version > 0 AND consent_version < ? AND policy_notified < ?",
+            (version, version),
+        )]
+
+    def mark_policy_notified(self, user_id, version):
+        self._set_user(user_id, "policy_notified", version)
+
+    def touch(self, user_id, now=None):
+        """Отметка «заходил в Mini App»; пишем не чаще раза в 10 минут."""
+        now = now or time.time()
+        with self.conn:
+            self.conn.execute(
+                "UPDATE users SET last_seen = ? WHERE user_id = ? AND (last_seen IS NULL OR last_seen < ?)",
+                (now, user_id, now - 600),
+            )
+
+    def count(self, name, now=None):
+        """+1 к обезличенному счётчику за сегодня (UTC)."""
+        day = time.strftime("%Y-%m-%d", time.gmtime(now or time.time()))
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO counters(day, name, n) VALUES (?, ?, 1) "
+                "ON CONFLICT(day, name) DO UPDATE SET n = n + 1", (day, name),
             )
 
     def delete_user(self, user_id):
@@ -271,11 +316,108 @@ class Storage:
             "SELECT user_id, created_at FROM referrals WHERE inviter_id = ? ORDER BY created_at DESC", (inviter_id,)
         ).fetchall()
 
+    def active_since(self, user_id, since):
+        """Начинал ли тренировку с момента since."""
+        return self.conn.execute(
+            "SELECT 1 FROM rides WHERE user_id = ? AND started_at >= ? LIMIT 1", (user_id, since)
+        ).fetchone() is not None
+
     def referral_totals(self):
         """Все пригласившие: (inviter_id, сколько), больше — выше."""
         return [tuple(r) for r in self.conn.execute(
             "SELECT inviter_id, COUNT(*) AS n FROM referrals GROUP BY inviter_id ORDER BY n DESC, MIN(created_at)"
         )]
+
+    # --- статистика для админки ---
+    def admin_stats(self, now, policy_version, tz=0, days=30):
+        """Сводка для админ-вкладки. tz — как Date.getTimezoneOffset() (UTC − местное, в минутах):
+        по нему режутся дни на графиках; policy_version — чтобы посчитать, кто не принял новые условия."""
+        q = lambda sql, *args: self.conn.execute(sql, args).fetchone()[0] or 0  # noqa: E731
+        day = 86400
+        week, prev, month = now - 7 * day, now - 14 * day, now - 30 * day
+        shift = -tz * 60  # местное время = UTC + shift
+        since = ((now + shift) // day - (days - 1)) * day - shift  # полночь по местному времени, days дней назад
+        users = "SELECT user_id FROM users WHERE consent_version > 0"
+
+        def active(start, end):
+            return q("SELECT COUNT(DISTINCT user_id) FROM rides WHERE started_at >= ? AND started_at < ?", start, end)
+
+        def rides(start, end):
+            return self.conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(distance_km), 0) FROM rides "
+                "WHERE ended_at IS NOT NULL AND started_at >= ? AND started_at < ?", (start, end),
+            ).fetchone()
+
+        def per_day(sql, *args):
+            out = [0] * days
+            for ts, n in self.conn.execute(sql, (since, *args)):
+                i = int((ts - since) // day)
+                if 0 <= i < days:
+                    out[i] += n
+            return out
+
+        def with_rides(at_least):
+            return q(f"SELECT COUNT(*) FROM (SELECT user_id FROM rides WHERE user_id IN ({users}) "
+                     "GROUP BY user_id HAVING COUNT(*) >= ?)", at_least)
+
+        rides_7, rides_prev = rides(week, now + 1), rides(prev, week)
+        cohort = q("SELECT COUNT(*) FROM users WHERE consent_version > 0 AND joined_at <= ?", week)
+        came_back = q(
+            "SELECT COUNT(*) FROM users u WHERE consent_version > 0 AND joined_at <= ? AND EXISTS "
+            "(SELECT 1 FROM rides r WHERE r.user_id = u.user_id AND r.started_at >= u.joined_at + ?)", week, 7 * day,
+        )
+        last_week = {r[0] for r in self.conn.execute(
+            "SELECT DISTINCT user_id FROM rides WHERE started_at >= ? AND started_at < ?", (prev, week))}
+        this_week = {r[0] for r in self.conn.execute("SELECT DISTINCT user_id FROM rides WHERE started_at >= ?", (week,))}
+        return {
+            "users": q("SELECT COUNT(*) FROM users WHERE consent_version > 0"),
+            "new_7d": q("SELECT COUNT(*) FROM users WHERE consent_version > 0 AND joined_at >= ?", week),
+            "new_prev_7d": q("SELECT COUNT(*) FROM users WHERE consent_version > 0 AND joined_at >= ? AND joined_at < ?",
+                             prev, week),
+            "active_7d": active(week, now + 1), "active_prev_7d": active(prev, week), "active_30d": active(month, now + 1),
+            "opened_7d": q("SELECT COUNT(*) FROM users WHERE consent_version > 0 AND last_seen >= ?", week),
+            "rides_7d": rides_7[0], "km_7d": round(rides_7[1], 1),
+            "rides_prev_7d": rides_prev[0], "km_prev_7d": round(rides_prev[1], 1),
+            "outdated_consent": q("SELECT COUNT(*) FROM users WHERE consent_version > 0 AND consent_version < ?",
+                                  policy_version),
+            "daily": {
+                "since": since,
+                "new": per_day("SELECT joined_at, 1 FROM users WHERE consent_version > 0 AND joined_at >= ?"),
+                "active": per_day("SELECT MIN(started_at), 1 FROM rides WHERE started_at >= ? "
+                                  "GROUP BY user_id, CAST((started_at + ?) / 86400 AS INT)", shift),
+                "rides": per_day("SELECT started_at, 1 FROM rides WHERE started_at >= ?"),
+            },
+            "funnel": [q("SELECT COUNT(*) FROM users WHERE consent_version > 0"),
+                       with_rides(1), with_rides(2), with_rides(5)],
+            "retention": {"cohort": cohort, "came_back": came_back,
+                          "last_week": len(last_week), "both_weeks": len(last_week & this_week)},
+            "kinds_30d": {k: {"rides": n, "km": round(km or 0, 1)} for k, n, km in self.conn.execute(
+                "SELECT kind, COUNT(*), SUM(distance_km) FROM rides WHERE ended_at IS NOT NULL AND started_at >= ? "
+                "GROUP BY kind", (month,))},
+            "features": {
+                "sessions": q("SELECT COUNT(*) FROM sessions"),
+                "sessions_together": q("SELECT COUNT(*) FROM (SELECT session_id FROM session_members "
+                                       "GROUP BY session_id HAVING COUNT(*) >= 2)"),
+                "joint_rides_30d": q("SELECT COUNT(*) FROM rides WHERE session_id IS NOT NULL AND started_at >= ?", month),
+                "sos_users": q("SELECT COUNT(DISTINCT user_id) FROM sos_contacts"),
+                "sos_contacts": q("SELECT COUNT(*) FROM sos_contacts"),
+                "rating_groups": q("SELECT COUNT(DISTINCT chat_id) FROM group_members"),
+                "rating_members": q("SELECT COUNT(DISTINCT user_id) FROM group_members"),
+                "ref_links": q("SELECT COUNT(*) FROM users WHERE ref_token IS NOT NULL"),
+                "weight_set": q("SELECT COUNT(*) FROM users WHERE consent_version > 0 AND weight_kg != ?", DEFAULT_WEIGHT),
+            },
+            "counters_30d": dict(self.conn.execute(
+                "SELECT name, SUM(n) FROM counters WHERE day >= ? GROUP BY name",
+                (time.strftime("%Y-%m-%d", time.gmtime(month)),)).fetchall()),
+            "langs": dict(self.conn.execute(
+                f"SELECT COALESCE(lang, tg_lang, '{DEFAULT_LANG}'), COUNT(*) FROM users WHERE consent_version > 0 "
+                "GROUP BY 1").fetchall()),
+            "recent": [dict(r) for r in self.conn.execute(
+                "SELECT u.user_id, u.joined_at, r.inviter_id, "
+                "(SELECT COUNT(*) FROM rides WHERE rides.user_id = u.user_id) AS rides "
+                "FROM users u LEFT JOIN referrals r ON r.user_id = u.user_id "
+                "WHERE consent_version > 0 ORDER BY u.joined_at DESC LIMIT 15")],
+        }
 
     # --- SOS ---
     def sos_token(self, user_id):

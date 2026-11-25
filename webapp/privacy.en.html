@@ -37,14 +37,16 @@ yourself with bot commands (see section 6).</p>
   <li><b>Weight</b>, if you enter it (otherwise 75 kg is used) — to estimate calories.</li>
   <li><b>Workout stats</b> calculated from the points: type, distance, time, speed, calories, records.</li>
   <li><b>Language</b>: the language of your Telegram (Russian, Ukrainian or English; any other counts as English) and the language chosen in the Mini App profile — so that the bot, the app and the cards speak it.</li>
-  <li><b>Consent record</b>: date and version of the accepted terms.</li>
+  <li><b>Consent record</b>: date and version of the accepted terms, the date of your first consent (sign-up) and when you last opened the Mini App, to the nearest 10 minutes.</li>
   <li><b>Joint workouts and group leaderboards</b> — only if you created a session yourself, joined one, or tapped “Join” in a group.</li>
   <li><b>Emergency contacts</b>: Telegram IDs of people who agreed via your link themselves. If you agreed to be someone's contact, only your Telegram ID and language (so that an SOS arrives in it) are stored.</li>
   <li><b>Invitations</b>: if you first came via an “Invite friends” link, the Telegram ID of the person who invited you and the date. A random code is stored for your own link.</li>
+  <li><b>Card photo</b>, if you add one as a background yourself: it is processed in the server's memory only to draw the card and is never stored. The finished image goes to the chat with the bot or, if you tap “Save”, is available via a random link for 10 minutes.</li>
+  <li><b>Anonymised counters</b> per day: how many cards were sent, how many times /start was tapped before consent; no Telegram IDs.</li>
   <li><b>Elevation gain</b> of a workout, if it could be determined (see Open-Meteo in section 4).</li>
 </ul>
 <p>Your name, username, phone number and profile photo are not stored. The bot requests your name from Telegram
-when showing it to joint workout participants or on a group leaderboard. No cookies or trackers are used.</p>
+when showing it: to joint workout participants, on a group leaderboard, in the list of invited friends and in the operator's statistics. No cookies or trackers are used.</p>
 
 <h2>2a. What others see</h2>
 <ul>
@@ -54,6 +56,7 @@ when showing it to joint workout participants or on a group leaderboard. No cook
   <li><b>Group leaderboard</b>: group members see your name and weekly distance by type — only after “Join”; “Leave” removes you from the leaderboard.</li>
   <li><b>SOS</b>: when you press SOS and confirm, your emergency contacts receive your name and last location.</li>
   <li><b>Invitations</b>: whoever invited you sees your name and the date in their Mini App profile; you see the people you invited the same way. The operator sees who invited whom, to understand how people find the service.</li>
+  <li><b>The operator</b> sees aggregate statistics (how many users and workouts, by day and type), names of recent sign-ups, who invited whom and how many workouts each person has, to improve the service. Routes and coordinates are not shown in these statistics.</li>
 </ul>
 
 <h2>3. Why</h2>

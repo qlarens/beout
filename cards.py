@@ -1,4 +1,8 @@
-"""Карточки тренировки: для чатов (4:5) и для Instagram Stories (9:16) — карта, маршрут, цифры, логотип."""
+"""Карточки тренировки: пост для чатов (4:5) и Instagram Stories (9:16, 1080×1920).
+
+Настройки: карта с маршрутом, только маршрут на тёмном или без карты; какие цифры показывать;
+своё фото на фоне — снизу оно плавно уходит в тёмную карточку с картой и цифрами.
+"""
 import io
 import math
 from functools import lru_cache
@@ -35,8 +39,8 @@ def project(lat, lon, z):
     return (lon + 180) / 360 * n, (1 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2 * n
 
 
-def map_view(track):
-    """Окно карты, в котором маршрут заполняет карту целиком (до MAP_MARGIN от края).
+def map_view(track, map_h=MAP_H):
+    """Окно карты MAP_W×map_h, в котором маршрут заполняет карту целиком (до MAP_MARGIN от края).
 
     Нужный зум дробный, а плитки есть только на целых: берём плитки зума z на ступень крупнее
     и уменьшаем мозаику в scale раз (0.5 < scale ≤ 1) — карта остаётся чёткой.
@@ -44,11 +48,11 @@ def map_view(track):
     """
     xs, ys = zip(*(project(lat, lon, 0) for lat, lon in track))
     dx, dy = max(xs) - min(xs), max(ys) - min(ys)
-    fit = min((MAP_W - 2 * MAP_MARGIN) / dx if dx else math.inf, (MAP_H - 2 * MAP_MARGIN) / dy if dy else math.inf)
+    fit = min((MAP_W - 2 * MAP_MARGIN) / dx if dx else math.inf, (map_h - 2 * MAP_MARGIN) / dy if dy else math.inf)
     zoom = max(0.0, min(math.log2(fit), MAP_MAX_ZOOM))  # одна точка: fit = inf → MAP_MAX_ZOOM
     z = math.ceil(zoom)
     scale, n = 2 ** (zoom - z), 2 ** z
-    w, h = MAP_W / scale, MAP_H / scale
+    w, h = MAP_W / scale, map_h / scale
     left, top = (min(xs) + max(xs)) / 2 * n - w / 2, (min(ys) + max(ys)) / 2 * n - h / 2
     tiles = [
         (z, x, y)
@@ -65,10 +69,10 @@ def rounded(size, radius):
     return mask
 
 
-def draw_map(img, top, track, tiles, lang):
+def draw_map(img, top, track, tiles, lang, map_h=MAP_H):
     """Тёмная карта со скруглёнными углами (без плиток — просто фон) и маршрут поверх. track не пуст."""
-    z, scale, left, wtop, keys = map_view(track)
-    panel, drawn = Image.new("L", (math.ceil(MAP_W / scale), math.ceil(MAP_H / scale)), 0), False
+    z, scale, left, wtop, keys = map_view(track, map_h)
+    panel, drawn = Image.new("L", (math.ceil(MAP_W / scale), math.ceil(map_h / scale)), 0), False
     for key in keys:
         try:
             tile = Image.open(io.BytesIO(tiles[key])).convert("L")
@@ -76,7 +80,7 @@ def draw_map(img, top, track, tiles, lang):
             continue
         panel.paste(tile, (round(key[1] * TILE - left), round(key[2] * TILE - wtop)))
         drawn = True
-    panel = ImageOps.colorize(panel.point(MAP_LUT), MAP_DARK, MAP_LIGHT).resize((MAP_W * S, MAP_H * S), Image.LANCZOS)
+    panel = ImageOps.colorize(panel.point(MAP_LUT), MAP_DARK, MAP_LIGHT).resize((MAP_W * S, map_h * S), Image.LANCZOS)
     img.paste(panel, (PAD * S, top * S), rounded(panel.size, 32))
 
     d = ImageDraw.Draw(img)
@@ -89,7 +93,7 @@ def draw_map(img, top, track, tiles, lang):
     for (x, y), fill in ((xy[0], WHITE), (xy[-1], LIME)):
         d.ellipse((x - r, y - r, x + r, y + r), fill=fill, outline=BG, width=6 * S)
     if drawn:  # лицензия OSM требует подпись
-        d.text(((PAD + MAP_W - 20) * S, (top + MAP_H - 16) * S), t(lang, "osm"),
+        d.text(((PAD + MAP_W - 20) * S, (top + map_h - 16) * S), t(lang, "osm"),
                font=font("Inter-Regular.ttf", 20), fill=MUTED, anchor="rs")
 
 
@@ -108,29 +112,11 @@ def png(img, height):
     return out.getvalue()
 
 
-def render_card(kind, stats, records=(), tiles=None, lang=DEFAULT_LANG):
-    """PNG карточки для чатов. stats — из compute_stats (нужен track), records — подписи новых рекордов,
-    tiles — {(z, x, y): PNG} для map_view(track), None — без карты."""
-    img = Image.new("RGB", (W * S, H * S), BG)
-    header(img, PAD, t(lang, f"kind_{kind}"), lang)
-    if stats["track"]:
-        draw_map(img, 200, stats["track"], tiles, lang)
-
-    d = ImageDraw.Draw(img)
-    cells = [  # 2×2: «1:02:13» крупным шрифтом в четыре колонки не влезает
-        (f"{stats['distance_km']:.2f}", t(lang, "card_km")),
-        (fmt_duration(stats["moving_s"]), t(lang, "card_moving")),
-        (f"{stats['avg_speed_kmh']}", t(lang, "card_kmh")),
-        (f"{stats['kcal']}", t(lang, "card_kcal")),
-    ]
-    col_w = (W - 2 * PAD) / 2
-    for i, (value, label) in enumerate(cells):
-        x, y = PAD + i % 2 * col_w, 940 + i // 2 * 155
-        d.text((x * S, y * S), value, font=font("InterDisplay-Bold.ttf", 80), fill=WHITE, anchor="ls")
-        d.text((x * S, (y + 46) * S), label, font=font("Inter-Regular.ttf", 32), fill=MUTED, anchor="ls")
-    for i, text in enumerate(records[:3]):
-        d.text((PAD * S, (1222 + i * 46) * S), text, font=font("Inter-Regular.ttf", 36), fill=LIME, anchor="ls")
-    return png(img, H)
+def jpeg_preview(img, height):
+    """Превью в Mini App: вдвое меньше и JPEG — быстро считается и быстро приходит."""
+    out = io.BytesIO()
+    img.resize((W // 2, height // 2), Image.LANCZOS).save(out, "JPEG", quality=82)
+    return out.getvalue()
 
 
 def aurora(width, height):
@@ -151,38 +137,186 @@ def aurora(width, height):
     return img
 
 
-def render_story(kind, stats, records=(), tiles=None, elevation_m=None, date="", lang=DEFAULT_LANG):
-    """PNG 1080×1920 для Instagram Stories: градиент, карта, дистанция крупно и подробные цифры.
-    Важное — между 200 и 1700 px по высоте: сверху и снизу Instagram кладёт свои кнопки."""
-    img = aurora(W, STORY_H).resize((W * S, STORY_H * S), Image.BICUBIC)
+# ---------- настраиваемая карточка ----------
+
+# высота, верх шапки, начало и конец содержимого
+FORMATS = {
+    "post": (H, PAD, 200, H - 64),
+    "story": (STORY_H, 200, 330, 1700),  # выше 200 и ниже 1700 px Instagram кладёт свои кнопки
+}
+FIELDS = ("distance", "time", "speed", "kcal", "elevation", "date", "records")
+PANELS = ("map", "route", "none")  # карта с маршрутом, маршрут на тёмном, без карты
+HERO = {"post": 150, "story": 200}  # дистанция крупно
+GAP = 48
+MIN_MAP_H = 280
+MAX_PHOTO_PIXELS = 40_000_000
+
+
+class PhotoError(ValueError):
+    """Не картинка или слишком большая."""
+
+
+def open_photo(data):
+    """Фото пользователя: учитываем поворот из EXIF, отказываемся от гигантских картинок."""
+    try:
+        img = Image.open(io.BytesIO(data))
+        if img.width * img.height > MAX_PHOTO_PIXELS:
+            raise PhotoError("too large")
+        return ImageOps.exif_transpose(img).convert("RGB")
+    except (OSError, Image.DecompressionBombError) as e:
+        raise PhotoError(str(e)) from e
+
+
+def cells_of(fmt, kind, stats, fields, elevation_m, lang):
+    """Сетка цифр под крупной дистанцией. У поста до 4 клеток, у Stories до 6."""
+    cells = []
+    if "time" in fields:
+        cells.append((fmt_duration(stats["moving_s"]), t(lang, "card_moving")))
+    if "speed" in fields:
+        cells.append((f"{stats['avg_speed_kmh']}", t(lang, "card_avg" if fmt == "story" else "card_kmh")))
+        if fmt == "story":
+            cells.append((f"{stats['max_speed_kmh']}", t(lang, "card_max")))
+    if "kcal" in fields:
+        cells.append((f"{stats['kcal']}", t(lang, "card_kcal")))
+    if "elevation" in fields and elevation_m:  # не узнали или по ровному — не показываем
+        cells.append((t(lang, "card_meters", m=elevation_m), t(lang, "card_elevation")))
+    if fmt == "story":
+        if "speed" in fields and kind == "run" and stats["best_1k_s"]:
+            cells.append((fmt_duration(stats["best_1k_s"]), t(lang, "rec_best_1k_s")))
+        if "time" in fields:
+            cells.append((fmt_duration(stats["duration_s"]), t(lang, "card_total")))
+    return cells[:6 if fmt == "story" else 4]
+
+
+def grid_shape(n, compact=False):
+    """Колонки, строки и кегль цифр: 2 и 4 клетки — по две в ряд и крупнее, иначе по три.
+    compact (поверх фото) — до четырёх в один ряд, чтобы фото осталось больше места."""
+    if compact and n <= 4:
+        return n, 1, 64 if n <= 3 else 52
+    cols = n if n <= 2 else 2 if n == 4 else 3
+    size = 80 if cols <= 2 else 64
+    return cols, math.ceil(n / cols), size
+
+
+def row_height(size):
+    return round(size * 0.75) + 52
+
+
+def grid_height(n, compact=False):
+    if not n:
+        return 0
+    _, rows, size = grid_shape(n, compact)
+    return rows * row_height(size) + (rows - 1) * 40
+
+
+def layout(fmt, n_cells, hero, n_records, panel, photo):
+    """Где стоят блоки: {имя: (верх, высота)}. Карта забирает свободное место, но не больше 640 px.
+
+    Без фото содержимое по центру под шапкой; с фото — прижато к низу, сверху видно фото.
+    """
+    height, _, top, bottom = FORMATS[fmt]
+    blocks = []
+    if hero:
+        blocks.append(("hero", round(HERO[fmt] * 0.74)))
+    if n_cells:
+        blocks.append(("grid", grid_height(n_cells, photo)))
+    if n_records:
+        blocks.append(("records", n_records * 50 - 14))
+    if panel != "none":
+        rest = sum(h for _, h in blocks) + GAP * len(blocks)
+        floor = round(height * 0.45) if photo else top  # с фото: верхние ~45% — само фото
+        prefer = (480 if fmt == "story" else 380) if photo else 640
+        blocks.insert(0, ("panel", max(MIN_MAP_H, min(prefer, bottom - floor - rest))))
+    total = sum(h for _, h in blocks) + GAP * max(0, len(blocks) - 1)
+    y = bottom - total if photo else top + max(0, (bottom - top - total) // 2)
+    where = {}
+    for name, h in blocks:
+        where[name] = (y, h)
+        y += h + GAP
+    return where
+
+
+def plan(fmt, kind, stats, panel="map", fields=FIELDS, records=(), elevation_m=None, photo=False, lang=DEFAULT_LANG):
+    """Состав и расстановка карточки; нужна и боту — узнать высоту карты, чтобы скачать плитки."""
+    fields = set(fields)
+    panel = panel if stats["track"] else "none"
+    cells = cells_of(fmt, kind, stats, fields, elevation_m, lang)
+    recs = list(records[:2]) if "records" in fields else []
+    hero = "distance" in fields
+    return panel, cells, recs, hero, layout(fmt, len(cells), hero, len(recs), panel, photo)
+
+
+def map_height(*args, **kwargs):
+    """Высота карты на карточке (None — карты нет): под неё скачиваются плитки."""
+    panel, *_, where = plan(*args, **kwargs)
+    return where["panel"][1] if panel != "none" else None
+
+
+def photo_background(data, height):
+    """Фото на весь кадр; сверху лёгкая тень под шапку."""
+    img = ImageOps.fit(open_photo(data), (W * S, height * S), Image.LANCZOS, centering=(0.5, 0.35))
+    shade = Image.linear_gradient("L").rotate(180).resize((W * S, 420 * S))  # 255 сверху → 0 снизу
+    img.paste(BG, (0, 0, W * S, 420 * S), shade.point(lambda v: int(v * 0.65)))
+    return img
+
+
+def fade_into_card(img, top, height):
+    """Плавный переход фото → тёмная карточка: от прозрачного за 420 px до блока к сплошному фону."""
+    y0, y1 = max(0, top - 420), max(1, top - 24)
+    ramp = Image.linear_gradient("L").resize((W * S, (y1 - y0) * S))
+    ramp = ramp.point(lambda v: int((v / 255) ** 1.6 * 255))  # мягче вверху, плотнее у цифр
+    img.paste(BG, (0, y0 * S, W * S, y1 * S), ramp)
+    img.paste(BG, (0, y1 * S, W * S, height * S))
+
+
+def render(fmt, kind, stats, panel="map", fields=FIELDS, records=(), tiles=None, elevation_m=None, date="",
+           photo=None, lang=DEFAULT_LANG, preview=False):
+    """PNG карточки (preview — JPEG вдвое меньше). fmt: post | story; panel: map | route | none;
+    fields — что показать из FIELDS; photo — байты картинки для фона; tiles — {(z, x, y): PNG}
+    для map_view(track, map_height(...)). PhotoError — фото не открылось."""
+    height, header_top, _, _ = FORMATS[fmt]
+    panel, cells, recs, hero, where = plan(fmt, kind, stats, panel, fields, records, elevation_m, bool(photo), lang)
+    if photo:
+        img = photo_background(photo, height)
+        fade_into_card(img, min(top for top, _ in where.values()), height)
+    elif fmt == "story":
+        img = aurora(W, height).resize((W * S, height * S), Image.BICUBIC)
+    else:
+        img = Image.new("RGB", (W * S, height * S), BG)
     title = t(lang, f"kind_{kind}")
-    header(img, 200, f"{title} · {date}" if date else title, lang)
-    if stats["track"]:
-        draw_map(img, 330, stats["track"], tiles, lang)
+    header(img, header_top, f"{title} · {date}" if date and "date" in fields else title, lang)
+    if panel != "none":
+        top, map_h = where["panel"]
+        draw_map(img, top, stats["track"], tiles if panel == "map" else None, lang, map_h)
 
     d = ImageDraw.Draw(img)
-    value = f"{stats['distance_km']:.2f}"
-    big = font("InterDisplay-Bold.ttf", 200)
-    d.text((PAD * S, 1190 * S), value, font=big, fill=WHITE, anchor="ls")
-    d.text((PAD * S + d.textlength(value, font=big) + 24 * S, 1190 * S), t(lang, "card_km"),
-           font=font("InterDisplay-Bold.ttf", 72), fill=LIME, anchor="ls")
+    if hero:
+        top, h = where["hero"]
+        value, big = f"{stats['distance_km']:.2f}", font("InterDisplay-Bold.ttf", HERO[fmt])
+        d.text((PAD * S, (top + h) * S), value, font=big, fill=WHITE, anchor="ls")
+        d.text((PAD * S + d.textlength(value, font=big) + 24 * S, (top + h) * S), t(lang, "card_km"),
+               font=font("InterDisplay-Bold.ttf", round(HERO[fmt] * 0.36)), fill=LIME, anchor="ls")
+    if cells:
+        top, _ = where["grid"]
+        cols, _, size = grid_shape(len(cells), bool(photo))
+        col_w, step = (W - 2 * PAD) / cols, row_height(size) + 40
+        for i, (value, label) in enumerate(cells):
+            x, y = PAD + i % cols * col_w, top + i // cols * step + round(size * 0.75)
+            d.text((x * S, y * S), value, font=font("InterDisplay-Bold.ttf", size), fill=WHITE, anchor="ls")
+            d.text((x * S, (y + 44) * S), label, font=font("Inter-Regular.ttf", 32 if cols <= 2 else 30 if cols == 3 else 26),
+                   fill=MUTED, anchor="ls")
+    if recs:
+        top, _ = where["records"]
+        for i, text in enumerate(recs):
+            d.text((PAD * S, (top + 36 + i * 50) * S), text, font=font("Inter-Regular.ttf", 34), fill=LIME, anchor="ls")
+    return jpeg_preview(img, height) if preview else png(img, height)
 
-    cells = [
-        (fmt_duration(stats["moving_s"]), t(lang, "card_moving")),
-        (f"{stats['avg_speed_kmh']}", t(lang, "card_avg")),
-        (f"{stats['max_speed_kmh']}", t(lang, "card_max")),
-        (f"{stats['kcal']}", t(lang, "card_kcal")),
-    ]
-    if elevation_m:  # не узнали или по ровному — не показываем
-        cells.append((t(lang, "card_meters", m=elevation_m), t(lang, "card_elevation")))
-    if kind == "run" and stats["best_1k_s"]:
-        cells.append((fmt_duration(stats["best_1k_s"]), t(lang, "rec_best_1k_s")))
-    cells = (cells + [(fmt_duration(stats["duration_s"]), t(lang, "card_total"))])[:6]  # сетка 3×2
-    col_w = (W - 2 * PAD) / 3
-    for i, (value, label) in enumerate(cells):
-        x, y = PAD + i % 3 * col_w, 1320 + i // 3 * 170
-        d.text((x * S, y * S), value, font=font("InterDisplay-Bold.ttf", 64), fill=WHITE, anchor="ls")
-        d.text((x * S, (y + 44) * S), label, font=font("Inter-Regular.ttf", 30), fill=MUTED, anchor="ls")
-    for i, text in enumerate(records[:2]):
-        d.text((PAD * S, (1640 + i * 50) * S), text, font=font("Inter-Regular.ttf", 34), fill=LIME, anchor="ls")
-    return png(img, STORY_H)
+
+def render_card(kind, stats, records=(), tiles=None, lang=DEFAULT_LANG):
+    """Пост 4:5 с настройками по умолчанию — для кнопки «Поделиться» под итогом в чате."""
+    return render("post", kind, stats, records=records, tiles=tiles, lang=lang)
+
+
+def render_story(kind, stats, records=(), tiles=None, elevation_m=None, date="", lang=DEFAULT_LANG):
+    """Stories 1080×1920 с настройками по умолчанию."""
+    return render("story", kind, stats, records=records, tiles=tiles, elevation_m=elevation_m, date=date, lang=lang)

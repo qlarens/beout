@@ -63,6 +63,24 @@ TEXTS = {
         "en": "Until you accept, I don't record anything. After that, start sharing your live location again.",
     },
     "btn_accept": {"ru": "✅ Принимаю", "uk": "✅ Приймаю", "en": "✅ I accept"},
+    "btn_read": {"ru": "📄 Прочитать", "uk": "📄 Прочитати", "en": "📄 Read"},
+    "policy_updated": {
+        "ru": "📄 <b>Условия использования обновились.</b>\n\n"
+              "Что нового: приглашения друзей по ссылке; своё фото на карточке тренировки "
+              "(обрабатывается и не хранится); дата регистрации и последнего входа в приложение — "
+              "для обезличенной статистики.\n\n"
+              "Пока ты не примешь новые условия, я не записываю тренировки.",
+        "uk": "📄 <b>Умови використання оновилися.</b>\n\n"
+              "Що нового: запрошення друзів за посиланням; своє фото на картці тренування "
+              "(обробляється й не зберігається); дата реєстрації та останнього входу в застосунок — "
+              "для знеособленої статистики.\n\n"
+              "Поки ти не приймеш нові умови, я не записую тренування.",
+        "en": "📄 <b>The terms of use have been updated.</b>\n\n"
+              "What's new: inviting friends with a link; your own photo on a workout card "
+              "(processed, never stored); the date you joined and last opened the app, "
+              "for anonymised statistics.\n\n"
+              "Until you accept the new terms, I won't record workouts.",
+    },
     "btn_policy": {
         "ru": "📄 Условия и конфиденциальность", "uk": "📄 Умови та конфіденційність", "en": "📄 Terms and privacy",
     },
@@ -162,6 +180,11 @@ TEXTS = {
         "ru": "{kind}: {km} км за {moving} · {speed}\n{app}",
         "uk": "{kind}: {km} км за {moving} · {speed}\n{app}",
         "en": "{kind}: {km} km in {moving} · {speed}\n{app}",
+    },
+    "card_saved_caption": {
+        "ru": "Карточка тренировки: перешли её или сохрани в галерею.",
+        "uk": "Картка тренування: перешли її або збережи в галерею.",
+        "en": "Your workout card: forward it or save it to your gallery.",
     },
     "story_caption": {
         "ru": "Для Instagram: открой картинку, сохрани в галерею и добавь в историю.",
@@ -323,6 +346,11 @@ TEXTS = {
     # --- ошибки API (видны в Mini App) ---
     "err_open_in_tg": {"ru": "Откройте приложение из Telegram", "uk": "Відкрийте застосунок із Telegram",
                        "en": "Open the app from Telegram"},
+    "err_photo": {
+        "ru": "Не получилось открыть фото — выбери другое (JPEG или PNG).",
+        "uk": "Не вдалося відкрити фото — вибери інше (JPEG або PNG).",
+        "en": "Couldn't open the photo. Pick another one (JPEG or PNG).",
+    },
     "err_consent": {
         "ru": "Сначала прими условия в чате с ботом: /start", "uk": "Спершу прийми умови в чаті з ботом: /start",
         "en": "First accept the terms in the chat with the bot: /start",

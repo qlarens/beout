@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import re
+import secrets
 from html import escape
 import os
 import time
@@ -38,7 +39,7 @@ from aiogram.types import (
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
 from auth import validate_init_data
-from cards import map_view, render_card, render_story
+from cards import FIELDS, FORMATS, PANELS, PhotoError, map_height, map_view, render, render_card
 from i18n import DEFAULT_LANG, LANGS, pick, t
 from stats import compute_stats, elevation_gain, fmt_duration, streaks
 from settings import (
@@ -72,7 +73,7 @@ ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 # Только для локальной отладки в обычном браузере, без Telegram. В проде не задавать!
 DEV_USER_ID = os.environ.get("DEV_USER_ID")
 # Поменял webapp/privacy.html — увеличь: бот попросит всех принять условия заново.
-POLICY_VERSION = 5
+POLICY_VERSION = 6
 PAGE_SIZE = 50
 NETWORK_RETRY_S = 10
 FLOOD_MAX_WAIT_S = 600
@@ -176,9 +177,17 @@ def policy_keyboard(lang, *extra_rows):
 
 
 def consent_keyboard(lang, ref=None):
-    """ref — «ref_<token>» из реферальной ссылки: едет в кнопке, чтобы до согласия ничего не хранить."""
-    data = f"consent:{ref}" if ref else "consent"
-    return policy_keyboard(lang, [InlineKeyboardButton(text=t(lang, "btn_accept"), callback_data=data)])
+    """«Прочитать» и «Принимаю» в один ряд. ref — «ref_<token>» из реферальной ссылки:
+    едет в кнопке, чтобы до согласия ничего не хранить."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=t(lang, "btn_read"), url=f"{WEBAPP_URL}/privacy?lang={lang}"),
+        InlineKeyboardButton(text=t(lang, "btn_accept"), callback_data=f"consent:{ref}" if ref else "consent"),
+    ]])
+
+
+def consent_text(user_id, lang):
+    """Новичку — коротко о данных; принимавшему старые условия — что они обновились."""
+    return t(lang, "policy_updated" if db.consent_version(user_id) else "consent")
 
 
 def welcome_text(user_id, lang):
@@ -280,12 +289,14 @@ async def finish_and_report(bot, ride_id, ts=None, manual=False):
     )
 
 
-async def send_card(bot, ride):
-    """Шлёт карточку тренировки в чат с владельцем. Возвращает (сообщение, подпись, кнопки)."""
+async def send_card(bot, ride, png=None):
+    """Шлёт карточку тренировки в чат с владельцем (png — уже нарисованная, иначе пост по умолчанию).
+    Возвращает (сообщение, подпись, кнопки)."""
     lang = db.user_lang(ride["user_id"])
     stats = compute_stats(db.get_points(ride["id"]), db.get_weight(ride["user_id"]), ride["kind"])
-    tiles = await card_tiles(stats["track"])
-    png = await asyncio.to_thread(render_card, ride["kind"], stats, record_labels(ride, lang), tiles, lang)
+    if png is None:
+        tiles = await card_tiles(stats["track"])
+        png = await asyncio.to_thread(render_card, ride["kind"], stats, record_labels(ride, lang), tiles, lang)
     caption = t(lang, "card_caption", kind=t(lang, f"kind_{ride['kind']}"), km=stats["distance_km"],
                 moving=fmt_duration(stats["moving_s"]), speed=speed_line(stats, lang), app=APP_NAME)
     # web_app-кнопки работают только в личке с ботом, а карточку пересылают в любые чаты — нужна ссылка.
@@ -302,15 +313,16 @@ _last_alert = 0.0
 
 
 async def notify_admin(bot, text):
-    """Сообщение администратору; не чаще раза в 5 минут, чтобы не завалить чат."""
+    """Сообщение администраторам; не чаще раза в 5 минут, чтобы не завалить чат."""
     global _last_alert
-    if not ADMIN_CHAT_ID or time.time() - _last_alert < 300:
+    if not admin_ids() or time.time() - _last_alert < 300:
         return
     _last_alert = time.time()
-    try:
-        await bot.send_message(int(ADMIN_CHAT_ID), text[:3500])
-    except Exception:
-        logging.exception("Не удалось написать администратору")
+    for chat_id in admin_ids():
+        try:
+            await bot.send_message(chat_id, text[:3500])
+        except Exception:
+            logging.exception("Не удалось написать администратору %s", chat_id)
 
 
 async def reply_in_place(callback: CallbackQuery, text, reply_markup=None):
@@ -333,8 +345,11 @@ async def cmd_start(message: Message, command: CommandObject):
         await sos_invitation(message, command.args.removeprefix("sos_"), lang)
         return
     if not has_consent(message.from_user.id):
+        if not db.consent_version(message.from_user.id):
+            db.count("start_new")  # обезличенно: сколько раз новые люди открывали бота
         ref = command.args if command.args and REF_ARG.match(command.args) else None
-        await message.answer(t(lang, "consent"), reply_markup=consent_keyboard(lang, ref))
+        await message.answer(consent_text(message.from_user.id, lang), parse_mode="HTML",
+                             reply_markup=consent_keyboard(lang, ref))
         return
     await set_user_menu(message.bot, message.from_user.id, lang)
     await message.answer(
@@ -405,13 +420,19 @@ async def on_consent(callback: CallbackQuery):
     newcomer = db.consent_version(user_id) == 0  # приглашением считается только первое согласие
     db.set_consent(user_id, POLICY_VERSION)
     lang = lang_of(callback.from_user)  # после согласия: язык Telegram запоминается
-    await reply_in_place(callback, f"{t(lang, 'consent')}\n\n{t(lang, 'consent_accepted')}", policy_keyboard(lang))
+    accepted = t(lang, "consent_accepted")
+    if not newcomer:  # обновлённые условия: без приветствия, сразу можно в трекер
+        await reply_in_place(callback, f"{t(lang, 'policy_updated')}\n\n{accepted}",
+                             open_app_keyboard(None, t(lang, "btn_open")))
+        await set_user_menu(callback.bot, user_id, lang)
+        return
+    await reply_in_place(callback, f"{t(lang, 'consent')}\n\n{accepted}", policy_keyboard(lang))
     await set_user_menu(callback.bot, user_id, lang)
     await callback.bot.send_message(
         user_id, welcome_text(user_id, lang), parse_mode="HTML",
         reply_markup=open_app_keyboard(None, t(lang, "btn_open")),
     )
-    if newcomer and callback.data.startswith("consent:ref_"):
+    if callback.data.startswith("consent:ref_"):
         await count_referral(callback.bot, user_id, callback.data.removeprefix("consent:ref_"))
 
 
@@ -434,13 +455,18 @@ async def count_referral(bot, user_id, token):
         logging.warning("Не удалось сообщить %s о приглашённом", inviter)
 
 
+def admin_ids():
+    """ADMIN_CHAT_ID: один или несколько Telegram ID через запятую или пробел."""
+    return {int(x) for x in re.split(r"[,\s]+", ADMIN_CHAT_ID or "") if re.fullmatch(r"-?\d+", x)}
+
+
 def is_admin(message):
-    return bool(ADMIN_CHAT_ID) and str(message.chat.id) == ADMIN_CHAT_ID.strip()
+    return message.chat.id in admin_ids()
 
 
 @private.message(Command("invites"))
 async def cmd_invites(message: Message):
-    """Только для владельца бота (ADMIN_CHAT_ID): кто сколько и кого пригласил."""
+    """Только для администраторов (ADMIN_CHAT_ID): кто сколько и кого пригласил. Подробнее — вкладка «Админ»."""
     if not is_admin(message):
         return
     lang = lang_of(message.from_user)
@@ -497,7 +523,8 @@ async def on_delete(callback: CallbackQuery):
 async def cmd_weight(message: Message, command: CommandObject):
     lang = lang_of(message.from_user)
     if not has_consent(message.from_user.id):
-        await message.answer(t(lang, "consent"), reply_markup=consent_keyboard(lang))
+        await message.answer(consent_text(message.from_user.id, lang), parse_mode="HTML",
+                             reply_markup=consent_keyboard(lang))
         return
     try:
         weight = float((command.args or "").replace(",", "."))
@@ -568,7 +595,8 @@ async def on_location(message: Message):
         return
     if not has_consent(message.from_user.id):
         await message.answer(
-            f"{t(lang, 'consent')}\n\n{t(lang, 'consent_then_restart')}", reply_markup=consent_keyboard(lang),
+            f"{consent_text(message.from_user.id, lang)}\n\n{t(lang, 'consent_then_restart')}", parse_mode="HTML",
+            reply_markup=consent_keyboard(lang),
         )
         return
 
@@ -700,11 +728,12 @@ async def on_error(event: ErrorEvent, bot: Bot):
 # ---------- API для Mini App ----------
 
 def fail(error, request, key):
-    """Ошибка для Mini App на языке её интерфейса (заголовок X-Lang)."""
-    return error(text=t(pick(request.headers.get("X-Lang")), key))
+    """Ошибка для Mini App на языке её интерфейса (заголовок X-Lang); X-Error — код для приложения."""
+    return error(text=t(pick(request.headers.get("X-Lang")), key), headers={"X-Error": key})
 
 
-def current_user_id(request):
+def auth_user_id(request):
+    """Telegram ID из подписанной initData — без проверки согласия."""
     user = validate_init_data(request.headers.get("X-Init-Data", ""), BOT_TOKEN)
     if user:
         user_id = int(user["id"])
@@ -714,9 +743,34 @@ def current_user_id(request):
         user_id = int(DEV_USER_ID)
     else:
         raise fail(web.HTTPUnauthorized, request, "err_open_in_tg")
+    return user_id
+
+
+def current_user_id(request):
+    """Telegram ID того, кто принял актуальные условия; иначе 403 с X-Error: err_consent —
+    Mini App тогда сама предлагает прочитать и принять."""
+    user_id = auth_user_id(request)
     if not has_consent(user_id):
         raise fail(web.HTTPForbidden, request, "err_consent")
+    db.touch(user_id)
     return user_id
+
+
+async def api_consent(request):
+    """Принять условия прямо в Mini App (без /start в чате)."""
+    user_id = auth_user_id(request)
+    newcomer = not db.consent_version(user_id)
+    db.set_consent(user_id, POLICY_VERSION)
+    await set_user_menu(request.app[BOT_KEY], user_id, db.user_lang(user_id))
+    return web.json_response({"accepted": POLICY_VERSION, "newcomer": newcomer})
+
+
+async def api_consent_info(request):
+    """Что показать на экране согласия: новичку — о данных, остальным — что условия обновились."""
+    user_id = auth_user_id(request)
+    updated = bool(db.consent_version(user_id))
+    return web.json_response({"updated": updated, "version": POLICY_VERSION,
+                              "lang": db.user_lang(user_id) if updated else None})  # новичку — язык Telegram
 
 
 def ride_to_json(ride):
@@ -749,6 +803,7 @@ async def api_rides(request):
         "session_id": (session := db.current_session(user_id)) and session["id"],
         "lang": db.user_lang(user_id),
         "lang_choice": db.lang_choice(user_id),  # None — как в Telegram
+        "admin": user_id in admin_ids(),
     })
 
 
@@ -971,11 +1026,9 @@ async def api_finish(request):
     return web.json_response({"ride": ride_to_json(db.get_ride(ride["id"]))})
 
 
-async def api_share(request):
+async def share_prepared(bot, ride, png):
     """Карточка уходит в чат с ботом, а Mini App получает id для shareMessage — отправить в любой чат."""
-    ride = own_ride(request)
-    bot = request.app[BOT_KEY]
-    message, caption, markup = await send_card(bot, ride)
+    message, caption, markup = await send_card(bot, ride, png)
     try:
         prepared = await bot.save_prepared_inline_message(
             user_id=ride["user_id"],
@@ -987,24 +1040,102 @@ async def api_share(request):
         )
     except TelegramAPIError as e:  # карточка всё равно в чате с ботом — её можно переслать
         logging.warning("savePreparedInlineMessage: %r", e)
-        return web.json_response({"prepared_id": None})
-    return web.json_response({"prepared_id": prepared.id})
+        return None
+    return prepared.id
 
 
-async def api_story(request):
-    """Карточка 9:16 для Instagram Stories — в чат с ботом: оттуда её сохраняют в галерею."""
+CARD_ACTIONS = ("preview", "chat", "bot", "download")
+CARD_FILE_TTL_S = 600
+_card_files = {}  # token → (до какого времени, PNG): для tg.downloadFile
+
+
+def card_options(request, form):
+    try:
+        opts = json.loads(form.get("options") or "{}")
+        fmt, panel, action = opts.get("format", "post"), opts.get("panel", "map"), opts.get("action", "preview")
+        fields = opts.get("fields", list(FIELDS))
+        if fmt not in FORMATS or panel not in PANELS or action not in CARD_ACTIONS or not set(fields) <= set(FIELDS):
+            raise ValueError
+    except (ValueError, TypeError, AttributeError):
+        raise web.HTTPBadRequest(text=f"options: format {'/'.join(FORMATS)}, panel {'/'.join(PANELS)}, "
+                                      f"fields из {', '.join(FIELDS)}, action {'/'.join(CARD_ACTIONS)}")
+    return fmt, panel, fields, action
+
+
+async def api_card(request):
+    """Настраиваемая карточка: превью (JPEG), в любой чат (пост), в чат с ботом или файлом в галерею.
+
+    multipart: options — JSON {format, panel, fields, action}, photo — фон (необязательно).
+    Фото обрабатывается в памяти и нигде не сохраняется; готовая картинка для скачивания живёт 10 минут.
+    """
     ride = own_ride(request)
-    date = f"{local_date(ride['started_at'], read_tz(request)):%d.%m.%Y}"
-    stats = compute_stats(db.get_points(ride["id"]), db.get_weight(ride["user_id"]), ride["kind"])
-    tiles = await card_tiles(stats["track"])
+    form = await request.post()
+    fmt, panel, fields, action = card_options(request, form)
+    photo = form.get("photo")
+    photo = photo.file.read() if photo is not None and hasattr(photo, "file") else None
     lang = db.user_lang(ride["user_id"])
-    png = await asyncio.to_thread(
-        render_story, ride["kind"], stats, record_labels(ride, lang), tiles, ride["elevation_gain_m"], date, lang
-    )
-    await request.app[BOT_KEY].send_photo(
-        ride["chat_id"], BufferedInputFile(png, filename="beout-story.png"), caption=t(lang, "story_caption"),
-    )
-    return web.json_response({"sent": True})
+    stats = compute_stats(db.get_points(ride["id"]), db.get_weight(ride["user_id"]), ride["kind"])
+    records, elevation = record_labels(ride, lang), ride["elevation_gain_m"]
+    date = f"{local_date(ride['started_at'], read_tz(request)):%d.%m.%Y}"
+    map_h = map_height(fmt, ride["kind"], stats, panel, fields, records, elevation, bool(photo), lang)
+    tiles = await fetch_tiles(map_view(stats["track"], map_h)[-1]) if map_h and panel == "map" else None
+    try:
+        image = await asyncio.to_thread(
+            render, fmt, ride["kind"], stats, panel, fields, records, tiles, elevation, date, photo, lang,
+            action == "preview",
+        )
+    except PhotoError:
+        raise fail(web.HTTPBadRequest, request, "err_photo")
+    if action == "preview":
+        return web.Response(body=image, content_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+    db.count(f"card_{fmt}_{action}")  # обезличенно: какие карточки и куда отправляют
+    if photo:
+        db.count("card_photo")
+    bot = request.app[BOT_KEY]
+    if action == "chat":
+        return web.json_response({"prepared_id": await share_prepared(bot, ride, image)})
+    if action == "bot":
+        await bot.send_photo(ride["chat_id"], BufferedInputFile(image, filename="beout.png"),
+                             caption=t(lang, "story_caption" if fmt == "story" else "card_saved_caption"))
+        return web.json_response({"sent": True})
+    now = time.time()
+    for token in [k for k, (until, _) in _card_files.items() if until < now]:
+        del _card_files[token]
+    token = secrets.token_urlsafe(16)
+    _card_files[token] = (now + CARD_FILE_TTL_S, image)
+    return web.json_response({"url": f"{WEBAPP_URL}/card/{token}.png", "file_name": f"beout-{fmt}-{ride['id']}.png"})
+
+
+async def card_file(request):
+    """Готовая карточка для tg.downloadFile: ссылка случайная и живёт 10 минут."""
+    until, image = _card_files.get(request.match_info["token"], (0, None))
+    if until < time.time():
+        raise web.HTTPNotFound()
+    return web.Response(body=image, content_type="image/png", headers={
+        "Content-Disposition": 'attachment; filename="beout.png"', "Cache-Control": "no-store"})
+
+
+async def api_admin(request):
+    """Статистика для вкладки «Админ». Не администратору — 404, будто адреса нет."""
+    user_id = current_user_id(request)
+    if user_id not in admin_ids():
+        raise web.HTTPNotFound()
+    bot, lang = request.app[BOT_KEY], db.user_lang(user_id)
+    stats = db.admin_stats(time.time(), POLICY_VERSION, read_tz(request))
+    leaders = []
+    for inviter, n in db.referral_totals():
+        invited = db.referrals(inviter)
+        leaders.append({
+            "name": await user_name(bot, inviter, lang), "count": n,
+            "invited": [{"name": await user_name(bot, r["user_id"], lang), "at": r["created_at"]} for r in invited],
+            "active": sum(1 for r in invited if db.active_since(r["user_id"], time.time() - 30 * 86400)),
+        })
+    for user in stats["recent"]:
+        user["name"] = await user_name(bot, user.pop("user_id"), lang)
+        inviter = user.pop("inviter_id")
+        user["invited_by"] = inviter and await user_name(bot, inviter, lang)
+    return web.json_response({**stats, "referrals": leaders, "policy_version": POLICY_VERSION})
 
 
 async def api_set_weight(request):
@@ -1035,7 +1166,7 @@ BOT_KEY = web.AppKey("bot", Bot)
 
 
 def make_web_app(bot):
-    app = web.Application()
+    app = web.Application(client_max_size=12 * 1024 * 1024)  # фото для карточки
     app[BOT_KEY] = bot  # итог по кнопке «Финиш» из Mini App уходит в чат
     app.router.add_get("/", index)
     app.router.add_get("/privacy", privacy)
@@ -1054,8 +1185,11 @@ def make_web_app(bot):
     app.router.add_delete("/api/sos/{contact_id:\\d+}", api_sos_remove)
     app.router.add_post("/api/rides/{ride_id:\\d+}/finish", api_finish)
     app.router.add_post("/api/rides/{ride_id:\\d+}/kind", api_ride_kind)
-    app.router.add_post("/api/rides/{ride_id:\\d+}/share", api_share)
-    app.router.add_post("/api/rides/{ride_id:\\d+}/story", api_story)
+    app.router.add_post("/api/rides/{ride_id:\\d+}/card", api_card)
+    app.router.add_get("/card/{token:[\\w-]+}.png", card_file)
+    app.router.add_post("/api/consent", api_consent)
+    app.router.add_get("/api/consent", api_consent_info)
+    app.router.add_get("/api/admin", api_admin)
     app.router.add_post("/api/weight", api_set_weight)
     app.router.add_post("/api/kind", api_set_kind)
     app.router.add_post("/api/lang", api_set_lang)
@@ -1078,6 +1212,25 @@ async def housekeeping(bot):
             logging.exception("Фоновая задача упала")
             await notify_admin(bot, f"⚠️ Фоновая задача: {e!r}")
         await asyncio.sleep(60)
+
+
+async def announce_policy(bot):
+    """Условия поменялись: один раз пишем всем, кто принимал старые, — с кнопками «Прочитать» и «Принимаю».
+    Без этого человек узнавал бы о новых условиях, только когда бот откажется записать тренировку."""
+    for user_id in db.users_to_notify(POLICY_VERSION):
+        lang = db.user_lang(user_id)
+        for _ in range(3):
+            try:
+                await bot.send_message(user_id, t(lang, "policy_updated"), parse_mode="HTML",
+                                       reply_markup=consent_keyboard(lang))
+                break
+            except TelegramRetryAfter as e:
+                await asyncio.sleep(e.retry_after)
+            except TelegramAPIError as e:  # заблокировал бота и т.п. — больше не пробуем
+                logging.info("Уведомление об условиях не доставлено %s: %r", user_id, e)
+                break
+        db.mark_policy_notified(user_id, POLICY_VERSION)
+        await asyncio.sleep(0.05)  # ~20 сообщений в секунду: ниже лимита Telegram
 
 
 async def wait_out_flood(bot):
@@ -1125,10 +1278,12 @@ async def main():
     # Частые сообщения о запуске — признак того, что бот падает и перезапускается.
     await notify_admin(bot, f"✅ {APP_NAME} запущен: {WEBAPP_URL}")
     background = asyncio.create_task(housekeeping(bot))
+    announce = asyncio.create_task(announce_policy(bot))
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         background.cancel()
+        announce.cancel()
         await runner.cleanup()
 
 
