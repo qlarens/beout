@@ -36,8 +36,9 @@ from auth import validate_init_data  # noqa: E402
 import cards  # noqa: E402
 from cards import MAP_H, MAP_MARGIN, MAP_W, TILE, map_view, project, render_card, render_story  # noqa: E402
 from aiohttp import FormData, web  # noqa: E402
-from stats import compute_stats, elevation_gain, streaks  # noqa: E402
+from stats import compute_stats, elevation_gain, haversine_m, streaks  # noqa: E402
 from i18n import TEXTS, pick, t  # noqa: E402
+import settings  # noqa: E402
 from settings import MAP_MAX_ZOOM, SESSION_TTL_S  # noqa: E402
 from storage import SCHEMA, STALE_AFTER_S, Storage  # noqa: E402
 
@@ -250,6 +251,45 @@ class StatsTest(unittest.TestCase):
         self.assertAlmostEqual(stats["distance_km"], 2.0, delta=0.03)
         self.assertAlmostEqual(stats["moving_s"], 360, delta=8)  # 2 км по 20 км/ч
 
+    def test_sparse_points_are_moving(self):
+        """Точки раз в 10–20 с: окно «стоим или идём» охватывало один отрезок, и ходьбу считало стоянкой."""
+        truth = track((0.8, 5), dt=1)
+        sampled, i = [], 0
+        while i < len(truth):
+            sampled.append(truth[i])
+            i += (10, 17, 13, 20)[len(sampled) % 4]
+        stats = compute_stats(noisy(sampled, 8), 70, "walk")
+        self.assertGreater(stats["moving_s"], 0.97 * stats["duration_s"])
+        self.assertAlmostEqual(stats["avg_speed_kmh"], 5, delta=0.4)
+        self.assertAlmostEqual(stats["distance_km"], 0.8, delta=0.04)
+
+    def test_phone_in_pocket(self):
+        """Экран заблокирован: почти все точки с погрешностью 35–65 м. Трек не схлопывается в прямую,
+        ходьба не становится стоянкой, скорость — не 20 км/ч."""
+        import random
+        rnd = random.Random(3)
+        truth = track((1, 5), dt=1)
+        sampled, i = [], 0
+        while i < len(truth):
+            acc = rnd.choice([10, 35, 65, 65])
+            t, lat, lon = truth[i]
+            sampled.append(noisy([(t, lat, lon)], acc, seed=i)[0])
+            i += rnd.randint(5, 15)
+        stats = compute_stats(sampled, 70, "walk")
+        self.assertGreater(stats["moving_s"], 0.9 * stats["duration_s"])
+        self.assertAlmostEqual(stats["distance_km"], 1.0, delta=0.06)
+        self.assertAlmostEqual(stats["avg_speed_kmh"], 5, delta=0.6)
+        self.assertGreater(len(stats["track"]), len(sampled) * 0.8)
+
+    def test_wrong_first_point(self):
+        """Telegram прислал первой старую позицию в 150 м: раньше она тянула за собой и отбрасывала начало трека."""
+        truth = noisy(track((0.6, 5), dt=4), 6)
+        t, lat, lon, acc = truth[0]
+        wrong = [(t, lat, lon + 150 / M_PER_DEG / 0.6157, 10)] + truth[1:]
+        stats, clean_stats = compute_stats(wrong, 70, "walk"), compute_stats(truth, 70, "walk")
+        self.assertLess(haversine_m(*stats["track"][0], lat, lon), 15)
+        self.assertAlmostEqual(stats["distance_km"], clean_stats["distance_km"], delta=0.015)  # без первых 4 с
+
     def test_max_speed_is_smoothed(self):
         points = track((1, 20), dt=10)
         t, lat, lon = points[10]
@@ -274,21 +314,48 @@ class StorageTest(unittest.TestCase):
         self.assertFalse(self.db.finish_ride(ride_id))  # второй итог не придёт
         self.assertGreater(self.db.get_ride(ride_id)["distance_km"], 0.4)
 
-    def test_change_kind_recomputes_stats(self):
+    def test_kind_fixed_after_finish(self):
         self.assertEqual(self.db.get_kind(1), "ride")
         ride_id = self.ride(points=[(i * 10, 52.0 + i * 0.001, 21.0) for i in range(10)])  # ~40 км/ч
+        self.assertTrue(self.db.set_ride_kind(ride_id, "walk"))  # пока идёт — можно поменять
+        self.assertTrue(self.db.set_ride_kind(ride_id, "ride"))
         self.db.finish_ride(ride_id)
         self.assertAlmostEqual(self.db.get_ride(ride_id)["distance_km"], 1.0, places=1)
-        self.db.set_ride_kind(ride_id, "run")
-        self.assertEqual(self.db.get_ride(ride_id)["distance_km"], 0)  # для бега такая скорость — скачки
+        self.assertFalse(self.db.set_ride_kind(ride_id, "run"))  # после финиша — нет: цифры не «прыгают»
+        self.assertEqual(self.db.get_ride(ride_id)["kind"], "ride")
+        self.assertAlmostEqual(self.db.get_ride(ride_id)["distance_km"], 1.0, places=1)
         self.db.set_kind(1, "walk")
         self.assertEqual(self.db.get_kind(1), "walk")
         self.assertEqual(self.db.get_weight(1), 75)  # остальные поля пользователя не тронуты
 
+    def test_finished_rides_recomputed_once(self):
+        """Новый расчёт (0.13.0): при первом запуске закрытые тренировки пересчитываются, дальше — нет."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "old.db")
+            db = Storage(path)
+            ride_id = db.start_ride(1, 1, 1, 0, kind="walk")
+            for i in range(60):
+                db.add_point(ride_id, i * 15, 52.0 + i * 0.00019, 21.0, 8)  # ходьба, точка раз в 15 с
+            db.finish_ride(ride_id)
+            with db.conn:
+                db.conn.execute("UPDATE rides SET moving_s = 300 WHERE id = ?", (ride_id,))  # как считал старый код
+                db.conn.execute("ALTER TABLE points DROP COLUMN snap_via")
+            db.conn.close()
+            db = Storage(path)
+            self.assertEqual(db.get_ride(ride_id)["moving_s"], 885)
+            db.conn.execute("UPDATE rides SET moving_s = 1 WHERE id = ?", (ride_id,))
+            db.conn.commit()
+            db.conn.close()
+            db = Storage(path)
+            self.assertEqual(db.get_ride(ride_id)["moving_s"], 1)
+            db.conn.close()
+
     def test_inaccurate_points_dropped(self):
         ride_id = self.db.start_ride(1, 1, 100, 0)
-        self.db.add_point(ride_id, 0, 52.0, 21.0, accuracy=500)
+        self.db.add_point(ride_id, 0, 52.0, 21.0, accuracy=500)  # по вышкам — шум
         self.assertEqual(self.db.get_points(ride_id), [])
+        self.db.add_point(ride_id, 5, 52.0, 21.0, accuracy=65)  # iPhone с заблокированным экраном — нужна
+        self.assertEqual(self.db.get_points(ride_id), [(5, 52.0, 21.0, 65)])
 
     def test_stale_rides(self):
         now = 1_000_000.0
@@ -717,51 +784,79 @@ class MapTest(unittest.IsolatedAsyncioTestCase):
 
 
 class MapMatchTest(unittest.IsolatedAsyncioTestCase):
-    """Привязка велотреков к дорогам: локальный сервер отвечает как OSRM /match."""
+    """Привязка к дорогам и тропинкам: локальный сервер отвечает как OSRM /match."""
 
     async def osrm(self, confidence=0.9, shift=0.0001):
+        """Каждая точка сдвинута на shift по долготе; путь между соседними — через вершину в 0,0002° к востоку."""
         self.requests = []
 
         async def match(request):
             coords = [tuple(map(float, c.split(","))) for c in request.match_info["coords"].split(";")]
-            self.requests.append((len(coords), request.query, request.headers["User-Agent"]))
-            return web.json_response({
-                "code": "Ok", "matchings": [{"confidence": confidence}],
-                "tracepoints": [None if i == 3 else {"location": [lon + shift, lat]} for i, (lon, lat) in enumerate(coords)],
-            })
+            self.requests.append((len(coords), request.query, request.headers["User-Agent"], request.path))
+            found = [(lon + shift, lat) for i, (lon, lat) in enumerate(coords) if i != 3]  # у 4-й дороги нет
+            legs = [{"steps": [{"geometry": {"coordinates": [list(a), [a[0] + 0.0002, (a[1] + b[1]) / 2], list(b)]}},
+                               {"geometry": {"coordinates": [list(b), list(b)]}}]}  # шаг «прибыли» — точка дважды
+                    for a, b in zip(found, found[1:])]
+            tracepoints, w = [], 0
+            for i, (lon, lat) in enumerate(coords):
+                if i == 3:
+                    tracepoints.append(None)
+                    continue
+                tracepoints.append({"location": [lon + shift, lat], "matchings_index": 0, "waypoint_index": w})
+                w += 1
+            return web.json_response({"code": "Ok", "matchings": [{"confidence": confidence, "legs": legs}],
+                                      "tracepoints": tracepoints})
 
         app = web.Application()
-        app.router.add_get("/match/{coords}", match)
+        app.router.add_get("/{profile}/match/{coords}", match)
         server = TestServer(app)
         await server.start_server()
         self.addAsyncCleanup(server.close)
-        return str(server.make_url("/match"))
+        return lambda profile: str(server.make_url(f"/{profile}/match"))
 
     async def test_match_in_chunks(self):
         url = await self.osrm()
         points = [(ts, lat, lon, 8, i) for i, (ts, lat, lon) in enumerate(track((2, 20), dt=4))]  # 360 с → 91 точка
         points += [(points[-1][0] + 4 * k, points[-1][1] + k * 0.0002, 21.0, 8, 91 + k) for k in range(1, 60)]
-        with patch.object(bot, "MAP_MATCH_URL", url), patch.object(bot.asyncio, "sleep", AsyncMock()):
-            snapped = await REAL_MAP_MATCH(points)
-        self.assertEqual([n for n, *_ in self.requests], [100, 50])  # кусками по 100
+        with patch.dict(bot.MAP_MATCH_URLS, {"ride": url("bike")}), patch.object(bot.asyncio, "sleep", AsyncMock()):
+            snapped = await REAL_MAP_MATCH(points, "ride")
+        # кусками по 100; соседние куски делят точку, чтобы путь по дорогам между ними не рвался
+        self.assertEqual([n for n, *_ in self.requests], [100, 51])
         query, agent = self.requests[0][1], self.requests[0][2]
         self.assertEqual(query["timestamps"].split(";")[:2], ["0", "4"])
         self.assertEqual(set(query["radiuses"].split(";")), {"8"})
+        self.assertEqual((query["steps"], query["geometries"], query["gaps"]), ("true", "geojson", "ignore"))
         self.assertTrue(agent.startswith("beout-bot/"))
         self.assertEqual(len(snapped), 148)  # у двух точек OSRM не нашёл дорогу
-        rowid, lat, lon = snapped[0]
-        self.assertEqual((rowid, lat), (0, points[0][1]))
+        rowid, lat, lon, via = snapped[0]
+        self.assertEqual((rowid, lat, via), (0, points[0][1], None))  # первая — пути до неё нет
         self.assertAlmostEqual(lon, points[0][2] + 0.0001)
+        rowid, lat, lon, via = snapped[1]
+        self.assertEqual(via[0], points[0][0])  # путь от предыдущей точки
+        self.assertEqual(via[1], [(round((points[0][1] + points[1][1]) / 2, 6), round(21.0003, 6))])
+        after_gap = next(s for s in snapped if s[0] == 4)
+        self.assertEqual(after_gap[3][0], points[2][0])  # 4-я не привязана — путь от 3-й
+        across = next(s for s in snapped if s[0] == points[100][4])
+        self.assertEqual(across[3][0], points[99][0])  # второй кусок продолжает путь от общей точки
+
+    async def test_profile_by_kind(self):
+        url = await self.osrm()
+        points = [(ts, lat, lon, 8, i) for i, (ts, lat, lon) in enumerate(track((0.5, 5), dt=5))]
+        with patch.dict(bot.MAP_MATCH_URLS, {"walk": url("foot")}):
+            self.assertIsNotNone(await REAL_MAP_MATCH(points, "walk"))
+        self.assertEqual(self.requests[0][3].split("/")[1], "foot")  # ходьба — по пешеходным дорожкам
+        self.assertIn("routed-foot", settings.MAP_MATCH_URLS["run"])
+        self.assertIn("routed-bike", settings.MAP_MATCH_URLS["ride"])
 
     async def test_low_confidence_or_unavailable(self):
         points = [(ts, lat, lon, 8, i) for i, (ts, lat, lon) in enumerate(track((1, 20), dt=4))]
         url = await self.osrm(confidence=0.2)
-        with patch.object(bot, "MAP_MATCH_URL", url):
-            self.assertIsNone(await REAL_MAP_MATCH(points))  # OSRM не уверен — трек остаётся как был
-        with patch.object(bot, "MAP_MATCH_URL", "http://127.0.0.1:1/match"):
-            self.assertIsNone(await REAL_MAP_MATCH(points))  # сервис недоступен
-        with patch.object(bot, "MAP_MATCH_URL", ""):
-            self.assertIsNone(await REAL_MAP_MATCH(points))  # выключено
+        with patch.dict(bot.MAP_MATCH_URLS, {"ride": url("bike")}):
+            self.assertIsNone(await REAL_MAP_MATCH(points, "ride"))  # OSRM не уверен — трек остаётся как был
+        with patch.dict(bot.MAP_MATCH_URLS, {"ride": "http://127.0.0.1:1/match"}):
+            self.assertIsNone(await REAL_MAP_MATCH(points, "ride"))  # сервис недоступен
+        with patch.dict(bot.MAP_MATCH_URLS, {"ride": ""}):
+            self.assertIsNone(await REAL_MAP_MATCH(points, "ride"))  # выключено
 
     def test_snap_ride(self):
         db = Storage(":memory:")
@@ -771,31 +866,63 @@ class MapMatchTest(unittest.IsolatedAsyncioTestCase):
             db.add_point(ride_id, ts, lat, lon, 8)
         db.finish_ride(ride_id)
         raw = db.raw_points(ride_id)
-        near = [(rowid, lat, lon + 3 / M_PER_DEG / 0.6157) for _, lat, lon, _, rowid in raw]  # дорога в 3 м
+        near = [(rowid, lat, lon + 3 / M_PER_DEG / 0.6157, None) for _, lat, lon, _, rowid in raw]  # дорога в 3 м
         self.assertTrue(db.snap_ride(ride_id, near, 0.25))
         self.assertAlmostEqual(db.get_points(ride_id)[0][2], near[0][2])
         self.assertEqual(db.export_user(1)["rides"][0]["points"][0]["lon"], raw[0][2])  # выгрузка — как записано
-        db.set_ride_kind(ride_id, "run")
-        self.assertEqual(db.get_points(ride_id)[0][2], raw[0][2])  # бег — без привязки к велодорогам
-        db.set_ride_kind(ride_id, "ride")
         n = len(raw)
         bulge = lambda i: max(0, n / 6 - abs(i - n / 2)) / (n / 6) * 800  # noqa: E731  до 800 м в сторону
-        detour = [(rowid, lat, lon + bulge(i) / M_PER_DEG / 0.6157) for i, (_, lat, lon, _, rowid) in enumerate(raw)]
+        detour = [(rowid, lat, lon + bulge(i) / M_PER_DEG / 0.6157, None)
+                  for i, (_, lat, lon, _, rowid) in enumerate(raw)]
         self.assertFalse(db.snap_ride(ride_id, detour, 0.25))  # «увела» на дорогу с крюком — не верим
         self.assertEqual(db.get_points(ride_id)[0][2], raw[0][2])
+        self.assertEqual(len(db.get_points(ride_id)[0]), 4)  # привязка снята целиком
+
+    def test_path_between_sparse_points(self):
+        """Ходьба «Г»: 300 м на юг, потом 300 м на восток, но точки только каждые 4 минуты — угол между ними.
+        Без пути по тропинкам это прямая через дома и −30 % дистанции; с ним — угол на месте и вся дистанция."""
+        db = Storage(":memory:")
+        self.addCleanup(db.conn.close)
+        k = 1 / M_PER_DEG / 0.6157
+        corner = (52.0 - 300 / M_PER_DEG, 21.0)
+        ride_id = db.start_ride(1, 1, 1, 0, kind="walk")
+        sparse = [(0, 52.0, 21.0), (240, 52.0 - 150 / M_PER_DEG, 21.0 + 150 * k), (480, corner[0], 21.0 + 320 * k)]
+        for ts, lat, lon in sparse:
+            db.add_point(ride_id, ts, lat, lon, 10)
+        db.finish_ride(ride_id)
+        straight = db.get_ride(ride_id)["distance_km"]
+        raw = db.raw_points(ride_id)
+        snapped = [(raw[0][4], 52.0, 21.0, None),
+                   (raw[1][4], corner[0], 21.0 + 150 * k, (0, [corner])),
+                   (raw[2][4], corner[0], 21.0 + 320 * k, None)]
+        self.assertTrue(db.snap_ride(ride_id, snapped, 0.25))
+        stats = compute_stats(db.get_points(ride_id), 70, "walk")
+        self.assertLess(straight, 0.5)
+        self.assertAlmostEqual(stats["distance_km"], 0.62, delta=0.02)  # 300 + 150 + 170 м по тропинкам
+        self.assertIn(corner, [tuple(p) for p in stats["track"]])  # угол нарисован, а не срезан
+        self.assertEqual(db.get_ride(ride_id)["distance_km"], stats["distance_km"])
+        # Путь с петлёй на километр — пути между этими точками не верим: прямая (335 + 170 м), петли на карте нет.
+        loop = [(raw[0][4], 52.0, 21.0, None),
+                (raw[1][4], corner[0], 21.0 + 150 * k, (0, [(52.01, 21.0), corner])),
+                (raw[2][4], corner[0], 21.0 + 320 * k, None)]
+        self.assertTrue(db.snap_ride(ride_id, loop, 0.25))
+        stats = compute_stats(db.get_points(ride_id), 70, "walk")
+        self.assertAlmostEqual(stats["distance_km"], 0.51, delta=0.01)
+        self.assertNotIn((52.01, 21.0), [tuple(p) for p in stats["track"]])
 
     async def test_finish_uses_matched_track(self):
         bot.db = Storage(":memory:")
         self.addCleanup(bot.db.conn.close)
         bot.db.set_consent(1, bot.POLICY_VERSION)
-        ride_id = bot.db.start_ride(1, 1, 1, 0, kind="ride")
-        for ts, lat, lon in track((1, 20), dt=4):
-            bot.db.add_point(ride_id, ts, lat, lon, 8)
-        snapped = [(rowid, lat, lon + 0.0001) for *_, rowid in bot.db.raw_points(ride_id) for lat, lon in [_[1:3]]]
-        with patch.object(bot, "map_match", AsyncMock(return_value=snapped)) as match:
-            await bot.finish_and_report(fake_bot(), ride_id)
-        match.assert_awaited_once()
-        self.assertAlmostEqual(bot.db.get_points(ride_id)[0][2], 21.0001)
+        for kind in ("ride", "walk"):  # и ходьба — к тропинкам
+            ride_id = bot.db.start_ride(1, 1, 1, 0, kind=kind)
+            for ts, lat, lon in track((1, 5 if kind == "walk" else 20), dt=4):
+                bot.db.add_point(ride_id, ts, lat, lon, 8)
+            snapped = [(rowid, lat, lon + 0.0001, None) for _, lat, lon, _, rowid in bot.db.raw_points(ride_id)]
+            with patch.object(bot, "map_match", AsyncMock(return_value=snapped)) as match:
+                await bot.finish_and_report(fake_bot(), ride_id)
+            self.assertEqual(match.await_args.args[1], kind)
+            self.assertAlmostEqual(bot.db.get_points(ride_id)[0][2], 21.0001)
 
 
 class ClubsTest(unittest.TestCase):
@@ -1413,6 +1540,11 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.db.get_kind(1), "run")  # стал типом по умолчанию
         await self.call("POST", "/api/kind", 1, json={"kind": "walk"})
         self.assertEqual((await (await self.call("GET", "/api/rides", 1)).json())["kind"], "walk")
+        bot.db.finish_ride(ride_id)
+        response = await self.call("POST", path, 1, json={"kind": "ride"})
+        self.assertEqual((response.status, response.headers["X-Error"]), (409, "kind_locked"))
+        self.assertEqual(bot.db.get_ride(ride_id)["kind"], "run")
+        self.assertEqual(bot.db.get_kind(1), "walk")  # и тип по умолчанию не тронут
 
     async def test_pagination(self):
         self.consent(1)
@@ -1430,7 +1562,7 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         response = await self.call("GET", "/privacy")
         self.assertEqual(response.status, 200)
         self.assertIn("/delete", await response.text())
-        for lang, text in (("en", "Revision 4"), ("uk", "Редакція 4"), ("de", "Редакция 4")):
+        for lang, text in (("en", "Revision 5"), ("uk", "Редакція 5"), ("de", "Редакция 5")):
             self.assertIn(text, await (await self.call("GET", f"/privacy?lang={lang}")).text())
 
     async def test_language(self):

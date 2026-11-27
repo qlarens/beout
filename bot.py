@@ -74,7 +74,7 @@ from settings import (
     MAP_MATCH_RADIUS_M,
     MAP_MATCH_TIMEOUT_S,
     MAP_MATCH_TOTAL_TIMEOUT_S,
-    MAP_MATCH_URL,
+    MAP_MATCH_URLS,
     MAP_TILES,
     MAP_TIMEOUT_S,
     MAP_USER_AGENT,
@@ -101,7 +101,7 @@ ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 # Только для локальной отладки в обычном браузере, без Telegram. В проде не задавать!
 DEV_USER_ID = os.environ.get("DEV_USER_ID")
 # Поменял webapp/privacy.html — увеличь: бот попросит всех принять условия заново.
-POLICY_VERSION = 8
+POLICY_VERSION = 9
 PAGE_SIZE = 50
 NETWORK_RETRY_S = 10
 FLOOD_MAX_WAIT_S = 600
@@ -265,46 +265,65 @@ async def fetch_elevations(track):
 _tiles = {}  # правила OSM требуют кэшировать плитки
 
 
-async def map_match(points):
-    """Привязка велотрека к дорогам (OSRM map matching). points — [(ts, lat, lon, accuracy, rowid)].
+def leg_path(leg):
+    """Вершины пути OSRM между двумя соседними точками, без них самих: [(lat, lon)]."""
+    coords = []
+    for step in leg.get("steps") or []:
+        for lon, lat in (step.get("geometry") or {}).get("coordinates") or []:
+            if not coords or coords[-1] != (lat, lon):
+                coords.append((lat, lon))
+    return [(round(lat, 6), round(lon, 6)) for lat, lon in coords[1:-1]]
 
-    Шлём точки без выбросов кусками по MAP_MATCH_CHUNK, не чаще запроса в секунду (правила публичного
-    сервера); только координаты и время, без Telegram ID. Кусок с низкой уверенностью OSRM пропускаем.
-    Возвращает [(rowid, lat, lon)] привязанных точек или None, если ничего не вышло.
+
+async def map_match(points, kind):
+    """Привязка трека к дорогам или тропинкам (OSRM map matching). points — [(ts, lat, lon, accuracy, rowid)].
+
+    Шлём точки без выбросов кусками по MAP_MATCH_CHUNK (соседние куски делят одну точку, чтобы путь не рвался),
+    не чаще запроса в секунду (правила публичного сервера); только координаты и время, без Telegram ID.
+    Кусок с низкой уверенностью OSRM пропускаем. Возвращает [(rowid, lat, lon, via)] привязанных точек или None,
+    если ничего не вышло; via — None или (ts предыдущей привязанной точки, [(lat, lon)] — путь по дорогам от неё).
     """
-    points = clean(points, "ride")
-    if not MAP_MATCH_URL or not 2 <= len(points) <= MAP_MATCH_MAX_POINTS:
+    url = MAP_MATCH_URLS.get(kind)
+    points = clean(points, kind)
+    if not url or not 2 <= len(points) <= MAP_MATCH_MAX_POINTS:
         return None
     lo, hi = MAP_MATCH_RADIUS_M
-    snapped = []
+    snapped = {}
     try:
         async with ClientSession(timeout=ClientTimeout(total=MAP_MATCH_TIMEOUT_S),
                                  headers={"User-Agent": MAP_USER_AGENT}) as http:
-            for start in range(0, len(points), MAP_MATCH_CHUNK):
+            for start in range(0, len(points) - 1, MAP_MATCH_CHUNK - 1):
                 chunk = points[start:start + MAP_MATCH_CHUNK]
-                if len(chunk) < 2:
-                    break
                 if start:
                     await asyncio.sleep(1)
                 coords = ";".join(f"{lon:.6f},{lat:.6f}" for _, lat, lon, *_ in chunk)
                 params = {
                     "timestamps": ";".join(str(int(p[0])) for p in chunk),
                     "radiuses": ";".join(str(round(min(max(p[3] or DEFAULT_ACCURACY_M, lo), hi))) for p in chunk),
-                    "overview": "false", "gaps": "split",
+                    # gaps=ignore: и через долгую паузу между точками нужен путь по дорогам, а не прямая
+                    "overview": "false", "steps": "true", "geometries": "geojson", "gaps": "ignore",
                 }
-                async with http.get(f"{MAP_MATCH_URL}/{coords}", params=params) as response:
+                async with http.get(f"{url}/{coords}", params=params) as response:
                     data = await response.json(content_type=None) if response.status == 200 else None
                 if not data or data.get("code") != "Ok" or not data.get("matchings"):
                     continue
                 if min(m.get("confidence", 0) for m in data["matchings"]) < MAP_MATCH_MIN_CONFIDENCE:
                     continue
+                last = {}  # matchings_index → ts предыдущей привязанной точки этого куска пути
                 for p, tp in zip(chunk, data.get("tracepoints") or []):
-                    if tp and tp.get("location"):
-                        snapped.append((p[4], tp["location"][1], tp["location"][0]))
+                    if not tp or not tp.get("location"):
+                        continue
+                    m, w = tp["matchings_index"], tp["waypoint_index"]
+                    legs = data["matchings"][m].get("legs") or []
+                    path = leg_path(legs[w - 1]) if m in last and 0 < w <= len(legs) else []
+                    via = (last[m], path) if path else None  # leg w-1 ведёт от точки w-1 к точке w
+                    last[m] = p[0]
+                    if p[4] not in snapped:  # общая с прошлым куском — там уже привязана
+                        snapped[p[4]] = (p[4], tp["location"][1], tp["location"][0], via)
     except (ClientError, asyncio.TimeoutError, ValueError, KeyError, TypeError, IndexError) as e:
         logging.warning("Привязка к дорогам не удалась: %r", e)
         return None
-    return snapped or None
+    return list(snapped.values()) or None
 
 
 async def fetch_tiles(keys):
@@ -341,13 +360,13 @@ async def finish_and_report(bot, ride_id, ts=None, manual=False):
     if not db.finish_ride(ride_id, ts):
         return
     ride = db.get_ride(ride_id)
-    if ride["kind"] == "ride":  # велотрек — к дорогам; не вышло — остаётся как записан
-        try:
-            snapped = await asyncio.wait_for(map_match(db.raw_points(ride_id)), MAP_MATCH_TOTAL_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            snapped = None
-        if snapped and db.snap_ride(ride_id, snapped, MAP_MATCH_MAX_CHANGE):
-            ride = db.get_ride(ride_id)
+    # Трек — к дорогам (велосипед) или тропинкам (бег, ходьба); не вышло — остаётся как записан.
+    try:
+        snapped = await asyncio.wait_for(map_match(db.raw_points(ride_id), ride["kind"]), MAP_MATCH_TOTAL_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        snapped = None
+    if snapped and db.snap_ride(ride_id, snapped, MAP_MATCH_MAX_CHANGE):
+        ride = db.get_ride(ride_id)
     track = compute_stats(db.get_points(ride_id), 0, ride["kind"])["track"]
     elevations = await fetch_elevations(track) if len(track) > 1 else None
     if elevations:  # сервис недоступен — просто без высоты
@@ -632,9 +651,13 @@ async def on_kind(callback: CallbackQuery):
     if not ride or ride["user_id"] != callback.from_user.id:
         await callback.answer(t(lang, "ride_not_found"))
         return
-    db.set_ride_kind(ride["id"], kind)
+    if not db.set_ride_kind(ride["id"], kind):  # кнопки под старым сообщением о старте — тренировка уже закончена
+        if isinstance(callback.message, Message):
+            await callback.message.edit_reply_markup(reply_markup=open_app_keyboard(ride["id"], t(lang, "btn_route")))
+        await callback.answer(t(lang, "kind_locked"), show_alert=True)
+        return
     db.set_kind(ride["user_id"], kind)  # следующая тренировка начнётся с этого типа
-    if ride["ended_at"] is None and isinstance(callback.message, Message):
+    if isinstance(callback.message, Message):
         await callback.message.edit_reply_markup(reply_markup=start_keyboard(db.get_ride(ride["id"]), lang))
     await callback.answer(t(lang, f"kind_{kind}"))
 
@@ -1817,7 +1840,7 @@ async def api_sos_send(request):
     contacts = db.sos_contacts(user_id)
     if not contacts:
         raise fail(web.HTTPBadRequest, request, "err_sos_no_contacts")
-    ts, lat, lon, _ = points[-1]
+    ts, lat, lon = points[-1][:3]
     bot = request.app[BOT_KEY]
     minutes = int(max(0, time.time() - ts) // 60)
     sent = 0
@@ -1849,9 +1872,11 @@ async def read_kind(request):
 
 
 async def api_ride_kind(request):
+    """Тип идущей тренировки; у завершённой не меняется — её цифры уже посчитаны для своего типа."""
     ride = own_ride(request)
     kind = await read_kind(request)
-    db.set_ride_kind(ride["id"], kind)
+    if not db.set_ride_kind(ride["id"], kind):
+        raise fail(web.HTTPConflict, request, "kind_locked")
     db.set_kind(ride["user_id"], kind)
     return web.json_response({"ride": ride_to_json(db.get_ride(ride["id"]))})
 

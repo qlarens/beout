@@ -1,4 +1,5 @@
 """Хранилище на SQLite: пользователи, поездки, точки маршрута."""
+import json
 import secrets
 import sqlite3
 import time
@@ -159,7 +160,10 @@ NEW_COLUMNS = {
     ),
     "group_members": ("feed INTEGER NOT NULL DEFAULT 0",),  # публиковать мои тренировки в этой группе
     "sos_contacts": ("lang TEXT",),  # язык контакта, когда он согласился: SOS придёт на нём
-    "points": ("snap_lat REAL", "snap_lon REAL"),  # точка, привязанная к дороге (только велотренировки)
+    "points": (
+        "snap_lat REAL", "snap_lon REAL",  # точка, привязанная к дороге или тропинке
+        "snap_via TEXT",  # JSON [ts предыдущей привязанной точки, [[lat, lon], ...]] — путь по дорогам от неё
+    ),
     "rides": (
         *(f"{k} NUMERIC" for k in STAT_KEYS),  # заполняются при завершении тренировки
         f"kind TEXT NOT NULL DEFAULT '{DEFAULT_ACTIVITY}'",
@@ -190,8 +194,9 @@ class Storage:
                     "(SELECT MIN(started_at) FROM rides WHERE rides.user_id = users.user_id), 9e18))"
                 )
                 self.conn.execute("UPDATE users SET joined_at = NULL WHERE joined_at = 9e18")
-            # Появилась новая статистика — пересчитать закрытые тренировки.
-            if added & set(STAT_KEYS):
+            # Появилась новая статистика или новый расчёт (0.13.0: неточные точки, окна «стоим или едем», путь
+            # между точками — с ним появилась колонка snap_via) — пересчитать закрытые тренировки один раз.
+            if added & {*STAT_KEYS, "snap_via"}:
                 for (ride_id,) in self.conn.execute(
                     "SELECT id FROM rides WHERE ended_at IS NOT NULL"
                 ).fetchall():
@@ -935,11 +940,11 @@ class Storage:
         return cur.rowcount == 1
 
     def set_ride_kind(self, ride_id, kind):
-        """Меняет тип тренировки; у завершённой пересчитывает статистику (фильтры и MET зависят от типа)."""
+        """Меняет тип идущей тренировки. У завершённой тип не меняется: её цифры и привязка к дорогам уже
+        посчитаны для него. False — тренировка уже завершена."""
         with self.conn:
-            self.conn.execute("UPDATE rides SET kind = ? WHERE id = ?", (kind, ride_id))
-            if self.get_ride(ride_id)["ended_at"] is not None:
-                self._save_stats(ride_id)
+            cur = self.conn.execute("UPDATE rides SET kind = ? WHERE id = ? AND ended_at IS NULL", (kind, ride_id))
+        return cur.rowcount == 1
 
     def _save_stats(self, ride_id):
         """Без commit: вызывается внутри транзакции."""
@@ -1040,17 +1045,21 @@ class Storage:
             )
 
     def get_points(self, ride_id):
-        """[(ts, lat, lon, accuracy)] по времени. У велотренировки — привязанные к дорогам, где привязка есть."""
+        """[(ts, lat, lon, accuracy)] по времени. Привязанные к дорогам — с координатами привязки и пятым полем:
+        None или (ts предыдущей привязанной точки, [(lat, lon)] — путь по дорогам от неё)."""
         rows = self.conn.execute(
-            "SELECT p.ts, p.lat, p.lon, p.accuracy, p.snap_lat, p.snap_lon, r.kind FROM points p "
-            "JOIN rides r ON r.id = p.ride_id WHERE p.ride_id = ? ORDER BY p.ts",
+            "SELECT ts, lat, lon, accuracy, snap_lat, snap_lon, snap_via FROM points WHERE ride_id = ? ORDER BY ts",
             (ride_id,),
         ).fetchall()
-        return [
-            (r["ts"], r["snap_lat"], r["snap_lon"], r["accuracy"])
-            if r["kind"] == "ride" and r["snap_lat"] is not None else (r["ts"], r["lat"], r["lon"], r["accuracy"])
-            for r in rows
-        ]
+        out = []
+        for r in rows:
+            if r["snap_lat"] is None:
+                out.append((r["ts"], r["lat"], r["lon"], r["accuracy"]))
+                continue
+            via = r["snap_via"] and json.loads(r["snap_via"])
+            out.append((r["ts"], r["snap_lat"], r["snap_lon"], r["accuracy"],
+                        (via[0], [tuple(v) for v in via[1]]) if via else None))
+        return out
 
     def raw_points(self, ride_id):
         """[(ts, lat, lon, accuracy, rowid)] как пришли из Telegram — для привязки к дорогам."""
@@ -1058,18 +1067,22 @@ class Storage:
             "SELECT ts, lat, lon, accuracy, rowid FROM points WHERE ride_id = ? ORDER BY ts", (ride_id,))]
 
     def snap_ride(self, ride_id, snapped, max_change):
-        """Привязка к дорогам: snapped — [(rowid, lat, lon)]. Если дистанция от неё изменилась больше чем
-        на max_change (доля), привязке не верим и оставляем исходный трек. True — привязка принята."""
+        """Привязка к дорогам: snapped — [(rowid, lat, lon, via)]. Если дистанция по самим привязанным точкам
+        изменилась больше чем на max_change (доля), привязке не верим и оставляем исходный трек. Путь между точками
+        (via) в этой проверке не участвует: на редких точках он и должен быть длиннее прямых. True — принята."""
         ride = self.get_ride(ride_id)
         before = compute_stats(self.get_points(ride_id), 0, ride["kind"])["distance_km"]
         with self.conn:
             self.conn.executemany(
-                "UPDATE points SET snap_lat = ?, snap_lon = ? WHERE rowid = ? AND ride_id = ?",
-                [(lat, lon, rowid, ride_id) for rowid, lat, lon in snapped],
+                "UPDATE points SET snap_lat = ?, snap_lon = ?, snap_via = ? WHERE rowid = ? AND ride_id = ?",
+                [(lat, lon, via and json.dumps([via[0], [list(v) for v in via[1]]]), rowid, ride_id)
+                 for rowid, lat, lon, via in snapped],
             )
-            after = compute_stats(self.get_points(ride_id), 0, ride["kind"])["distance_km"]
+            plain = [p[:4] + (None,) if len(p) > 4 else p for p in self.get_points(ride_id)]
+            after = compute_stats(plain, 0, ride["kind"])["distance_km"]
             if not before or abs(after - before) / before > max_change:
-                self.conn.execute("UPDATE points SET snap_lat = NULL, snap_lon = NULL WHERE ride_id = ?", (ride_id,))
+                self.conn.execute(
+                    "UPDATE points SET snap_lat = NULL, snap_lon = NULL, snap_via = NULL WHERE ride_id = ?", (ride_id,))
                 return False
             self._save_stats(ride_id)
         return True

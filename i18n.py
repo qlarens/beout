@@ -66,19 +66,22 @@ TEXTS = {
     "btn_read": {"ru": "📄 Прочитать", "uk": "📄 Прочитати", "en": "📄 Read"},
     "policy_updated": {
         "ru": "📄 <b>Условия использования обновились.</b>\n\n"
-              "Что нового: активности в группах — лента тренировок (только если включишь «Публиковать»), "
-              "челленджи, сборы, дуэли, битвы клубов и номинации недели; для времени сборов храним часовой пояс "
-              "телефона. Раньше — привязка велотреков к дорогам (OSRM), приглашения и своё фото на карточке.\n\n"
+              "Что нового: бег и ходьба тоже привязываются к пешеходным дорожкам (OSRM), а путь между редкими точками "
+              "восстанавливается по дорогам — трек больше не срезает углы прямыми. Раньше — активности в группах: лента "
+              "тренировок (только если включишь «Публиковать»), челленджи, сборы, дуэли, битвы клубов, номинации недели "
+              "и часовой пояс телефона для времени сборов.\n\n"
               "Пока ты не примешь новые условия, я не записываю тренировки.",
         "uk": "📄 <b>Умови використання оновилися.</b>\n\n"
-              "Що нового: активності в групах — стрічка тренувань (лише якщо ввімкнеш «Публікувати»), "
-              "челенджі, збори, дуелі, битви клубів і номінації тижня; для часу зборів зберігаємо часовий пояс "
-              "телефона. Раніше — прив'язка велотреків до доріг (OSRM), запрошення та своє фото на картці.\n\n"
+              "Що нового: біг і ходьба теж прив'язуються до пішохідних доріжок (OSRM), а шлях між рідкими точками "
+              "відновлюється дорогами — трек більше не зрізає кути прямими. Раніше — активності в групах: стрічка "
+              "тренувань (лише якщо ввімкнеш «Публікувати»), челенджі, збори, дуелі, битви клубів, номінації тижня та "
+              "часовий пояс телефона для часу зборів.\n\n"
               "Поки ти не приймеш нові умови, я не записую тренування.",
         "en": "📄 <b>The terms of use have been updated.</b>\n\n"
-              "What's new: group activities — a workout feed (only if you turn on “Post”), challenges, "
-              "meetups, duels, club battles and weekly awards; we store your phone's time zone for meetup times. "
-              "Earlier: bike rides snapped to roads (OSRM), invites and your own photo on cards.\n\n"
+              "What's new: runs and walks are snapped to footpaths too (OSRM), and the path between sparse points is "
+              "restored along them — the track no longer cuts corners with straight lines. Earlier: group activities — "
+              "a workout feed (only if you turn on “Post”), challenges, meetups, duels, club battles, weekly awards and "
+              "your phone's time zone for meetup times.\n\n"
               "Until you accept the new terms, I won't record workouts.",
     },
     "btn_policy": {
@@ -363,6 +366,11 @@ TEXTS = {
     "err_session": {
         "ru": "Совместная тренировка не найдена", "uk": "Спільне тренування не знайдено",
         "en": "Joint workout not found",
+    },
+    "kind_locked": {
+        "ru": "Тренировка уже завершена — её тип не меняется",
+        "uk": "Тренування вже завершене — його тип не змінюється",
+        "en": "This workout has finished, so its type can't be changed",
     },
     "err_sos_no_location": {
         "ru": "Нет геопозиции: SOS работает во время тренировки с трансляцией",
