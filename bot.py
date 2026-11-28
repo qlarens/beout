@@ -1498,6 +1498,8 @@ async def inline_card(request):
         raise web.HTTPNotFound()
     if image is None:
         ride = db.get_ride(ride_id)
+        if not ride:  # тренировку удалили, пока ссылка жива
+            raise web.HTTPNotFound()
         lang = db.user_lang(ride["user_id"])
         stats = compute_stats(db.get_points(ride_id), db.get_weight(ride["user_id"]), ride["kind"])
         image = await asyncio.to_thread(render, "post", ride["kind"], stats, "map", FIELDS, record_labels(ride, lang),

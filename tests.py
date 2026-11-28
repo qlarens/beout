@@ -34,7 +34,7 @@ REAL_MAP_MATCH = bot.map_match  # и в OSRM: см. MapMatchTest
 bot.map_match = AsyncMock(return_value=None)
 from auth import validate_init_data  # noqa: E402
 import cards  # noqa: E402
-from cards import MAP_H, MAP_MARGIN, MAP_W, TILE, map_view, project, render_card, render_story  # noqa: E402
+from cards import MAP_H, MAP_MARGIN, MAP_W, TILE, map_view, project, render, render_card  # noqa: E402
 from aiohttp import FormData, web  # noqa: E402
 from stats import compute_stats, elevation_gain, haversine_m, streaks  # noqa: E402
 from i18n import TEXTS, pick, t  # noqa: E402
@@ -107,7 +107,7 @@ class I18nTest(unittest.TestCase):
         stats = compute_stats(track((1.2, 10)), 70, "run")
         for lang, label in (("en", "km/h average"), ("uk", "км/год середня")):
             with patch.object(ImageDraw.ImageDraw, "text", autospec=True) as text:
-                render_story("run", stats, [], None, 12, "", lang)
+                render("story", "run", stats, elevation_m=12, lang=lang)
             self.assertIn(label, [c.args[2] for c in text.call_args_list])
 
 
@@ -661,14 +661,15 @@ class CardTest(unittest.TestCase):
             for tiles in (None, tiles):
                 png = render_card("run", stats, ["Новый рекорд: самая длинная"], tiles)
                 self.assertEqual(Image.open(io.BytesIO(png)).size, (1080, 1350))
-                png = render_story("run", stats, ["Новый рекорд: самая длинная"], tiles, 12, "24.11.2026")
+                png = render("story", "run", stats, records=["Новый рекорд: самая длинная"], tiles=tiles, elevation_m=12,
+                             date="24.11.2026")
                 self.assertEqual(Image.open(io.BytesIO(png)).size, (1080, 1920))
 
     def test_story_hides_missing_elevation(self):
         stats = compute_stats(track((1.2, 10)), 70, "run")
         for elevation, shown in ((None, False), (0, False), (35, True)):
             with patch.object(ImageDraw.ImageDraw, "text", autospec=True) as text:
-                render_story("run", stats, [], None, elevation, "", "ru")
+                render("story", "run", stats, elevation_m=elevation, lang="ru")
             labels = [c.args[2] for c in text.call_args_list]
             self.assertEqual("набор высоты" in labels, shown)
             self.assertIn("лучший 1 км", labels)
@@ -1057,7 +1058,7 @@ class GroupsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_feed(self):
         await bot.on_feed(self.press("feed:on", user_id=1))
-        self.assertTrue(bot.db.is_group_member(self.CHAT, 1))  # публикация включает и рейтинг
+        self.assertIn(1, bot.db.group_members(self.CHAT))  # публикация включает и рейтинг
         bot.db.set_group_member(self.CHAT, 2, True)  # в рейтинге, но не публикует
         await self.ride(2, 5)
         self.tg.send_photo.assert_not_called()
@@ -1392,6 +1393,12 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.content_type, "image/jpeg")
         self.assertEqual(Image.open(io.BytesIO(await response.read())).size, (1080, 1350))
         self.assertEqual((await self.call("GET", "/inline/nope.jpg")).status, 404)
+
+        q = query(1)
+        await bot.on_inline(q)
+        last = q.answer.call_args.args[0][0]
+        bot.db.delete_ride(int(last.id.removeprefix("last")))  # удалили до того, как Telegram забрал картинку
+        self.assertEqual((await self.call("GET", last.photo_url.removeprefix("https://example.test"))).status, 404)
 
     async def test_consent_in_mini_app(self):
         response = await self.call("GET", "/api/rides", 1)

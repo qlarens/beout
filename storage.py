@@ -719,11 +719,6 @@ class Storage:
         row = self.conn.execute("SELECT tz FROM users WHERE user_id = ?", (user_id,)).fetchone()
         return row and row["tz"]
 
-    def is_group_member(self, chat_id, user_id):
-        return self.conn.execute(
-            "SELECT 1 FROM group_members WHERE chat_id = ? AND user_id = ?", (chat_id, user_id)
-        ).fetchone() is not None
-
     def group_members(self, chat_id):
         return [r[0] for r in self.conn.execute("SELECT user_id FROM group_members WHERE chat_id = ?", (chat_id,))]
 

@@ -492,7 +492,6 @@ TEXTS.update({
     "nom_value_early": {"ru": "старт {value}", "uk": "старт {value}", "en": "start {value}"},
     "nom_value_steady": {"ru": "{value} дн.", "uk": "{value} дн.", "en": "{value} days"},
     "nom_value_progress": {"ru": "+{value} км", "uk": "+{value} км", "en": "+{value} km"},
-    "week_card_title": {"ru": "Итоги недели", "uk": "Підсумки тижня", "en": "Week results"},
     "week_card_total": {"ru": "км вместе", "uk": "км разом", "en": "km together"},
     "week_card_people": {"ru": "участников тренировались", "uk": "учасників тренувалися", "en": "members trained"},
     # челленджи
@@ -633,7 +632,6 @@ TEXTS.update({
                      "en": "Code not found or expired."},
     "war_same": {"ru": "Это код вашей же группы — отправьте его в другую.", "uk": "Це код вашої ж групи — надішліть його в іншу.",
                  "en": "That's your own group's code: send it to the other group."},
-    "war_expired": {"ru": "Битву никто не принял.", "uk": "Битву ніхто не прийняв.", "en": "No one accepted the battle."},
     "group_untitled": {"ru": "Группа", "uk": "Група", "en": "Group"},
     # напоминания
     "nudge_idle": {"ru": "👟 Группа не тренировалась уже {days} дн. Кто сегодня?",
@@ -660,7 +658,6 @@ TEXTS.update({
     "inline_records_text": {"ru": "🏆 Мои рекорды в {app}:", "uk": "🏆 Мої рекорди в {app}:", "en": "🏆 My records in {app}:"},
     "inline_record_line": {"ru": "• {kind} — {what}: {value}", "uk": "• {kind} — {what}: {value}",
                            "en": "• {kind} — {what}: {value}"},
-    "inline_no_records": {"ru": "Пока без рекордов", "uk": "Поки без рекордів", "en": "No records yet"},
     "inline_invite_text": {"ru": "Записываю тренировки в {app} прямо в Telegram — присоединяйся: {link}",
                            "uk": "Записую тренування в {app} просто в Telegram — приєднуйся: {link}",
                            "en": "I track my workouts with {app} right in Telegram. Join me: {link}"},

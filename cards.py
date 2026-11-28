@@ -324,11 +324,6 @@ def render_card(kind, stats, records=(), tiles=None, lang=DEFAULT_LANG):
     return render("post", kind, stats, records=records, tiles=tiles, lang=lang)
 
 
-def render_story(kind, stats, records=(), tiles=None, elevation_m=None, date="", lang=DEFAULT_LANG):
-    """Stories 1080×1920 с настройками по умолчанию."""
-    return render("story", kind, stats, records=records, tiles=tiles, elevation_m=elevation_m, date=date, lang=lang)
-
-
 def plain(text):
     """Без эмодзи и прочих символов вне шрифта Inter: имена из Telegram бывают любыми."""
     return "".join(ch for ch in text if ord(ch) < 0x2000 or 0x2010 <= ord(ch) <= 0x206F).strip() or "—"
